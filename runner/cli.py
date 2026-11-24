@@ -295,7 +295,9 @@ def cmd_telegram_chat_id(eng, a):
 
 def cmd_selftest(eng, a):
     test = os.path.join(RUNNER_HOME, "tests", "selftest.py")
-    return subprocess.call([sys.executable, test] + (["-v"] if a.verbose else []))
+    print("Running 22 sandbox tests with a fake agent (no usage). This takes about 1-2 minutes;\n"
+          "a few tests deliberately wait 3-30 seconds. Please let it finish.\n", flush=True)
+    return subprocess.call([sys.executable, "-W", "ignore", test, "-v"])
 
 
 def cmd_progress(eng, a):
