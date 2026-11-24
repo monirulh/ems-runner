@@ -105,8 +105,8 @@ class Engine(object):
         try:
             fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            print("another runner daemon is already running", file=sys.stderr)
-            return 1
+            # another daemon runs: wait quietly and take over if it ever stops (no restart loop)
+            fcntl.flock(lockfd, fcntl.LOCK_EX)
         with open(pidfile, "w") as f:
             f.write(str(os.getpid()))
         self._stop = False

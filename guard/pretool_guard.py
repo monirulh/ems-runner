@@ -9,8 +9,10 @@ import sys
 
 
 def deny(reason):
-    sys.stderr.write("BLOCKED by EMS runner guard: %s. Do not retry this action; if it is needed, "
-                     "finish with EMS_RESULT status blocked (reason owner-action) and explain why.\n" % reason)
+    sys.stderr.write("BLOCKED by EMS runner guard: %s. Do not retry this action. If you only need to WRITE a file "
+                     "whose text mentions such words or paths (for example a hook's block list), use the Write tool "
+                     "instead of a shell command. If the action itself is needed, finish with EMS_RESULT status blocked "
+                     "(reason owner-action) and explain why.\n" % reason)
     sys.exit(2)
 
 
@@ -85,7 +87,9 @@ def main():
         (r"(secrets\.env|\.skysoft/|infra/\.env|qa/\.env\.local)", "secrets files are not read or printed by agents"),
     ]
     for pat, why in checks:
-        if re.search(pat, full if "DROP" in pat else c, re.I):
+        # here-document bodies count as commands only when fed to a database client or interpreter
+        executes = re.search(r"\b(mysql|mariadb|psql|sqlite3|bench|dc\.sh|docker|python3?|node|bash|sh|zsh)\b[^|;&<]*<<", full)
+        if re.search(pat, full if ("DROP" in pat and executes) else c, re.I):
             deny(why)
     if re.search(r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*|-[a-zA-Z]*R)", c):
         targets = [t for t in c.split() if not t.startswith("-") and t not in ("rm",)]

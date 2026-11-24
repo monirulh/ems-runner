@@ -430,6 +430,8 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(B("grep -r x source_snapshot/education/"), 2)
         self.assertEqual(B("cd source_snapshot/education && ls"), 2)
         self.assertEqual(B("mysql <<'SQL'\nDROP TABLE tabX;\nSQL"), 2)
+        self.assertEqual(B("cat > infra/p000/hooks/pre_bash.py <<'EOF'\nPATS = [r'DROP\\s+TABLE', 'TRUNCATE TABLE']\nEOF"), 0)
+        self.assertEqual(B("bench --site ems.localhost mariadb <<'SQL'\nTRUNCATE TABLE tabX;\nSQL"), 2)
         self.assertEqual(B("sed -i s/a/b/ apps/skyui/x.css"), 2)
         self.assertEqual(g("Write", {"file_path": "docs/collab/approvals/G01_release.md"}), 2)
         self.assertEqual(g("Edit", {"file_path": "docs/research/EMS_Development_Guide.md"}), 2)
