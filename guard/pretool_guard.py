@@ -61,7 +61,10 @@ def main():
     if tool != "Bash":
         return 0
     cmd = inp.get("command", "")
-    c = " ".join(cmd.split())
+    full = " ".join(cmd.split())
+    # text inside here-documents is file content being written, not a command
+    body_free = re.sub(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n\s*\2\s*(\n|$)", "<<HEREDOC\n", cmd, flags=re.S)
+    c = " ".join(body_free.split())
     checks = [
         (r"\bsudo\b", "sudo is not used in unattended runs"),
         (r"\b(curl|wget)\b[^|]*\|\s*(ba|z)?sh\b", "piping downloads into a shell is not allowed"),
@@ -77,17 +80,29 @@ def main():
         (r"\bbench\s+update\b", "no bench update outside a planned upgrade phase"),
         (r"(>|\btee\b|\bcp\b|\bmv\b|\btouch\b|\bsed\s+-i|\brm\b|\bln\b)[^;&|]*docs/collab/approvals",
          "approval files are written only by Research (OP-Q1)"),
-        (r"source_snapshot/education", "the Frappe Education snapshot is not read (D1, CM-Q4)"),
+        (r"\b(cat|less|more|head|tail|grep|egrep|rg|ag|find|ls|tree|cp|rsync|tar|zip|open|code|sed|awk|wc|diff|python3?|node|cd)\b[^|;&]*source_snapshot/education",
+         "the Frappe Education snapshot is not read (D1, CM-Q4)"),
         (r"(secrets\.env|\.skysoft/|infra/\.env|qa/\.env\.local)", "secrets files are not read or printed by agents"),
     ]
     for pat, why in checks:
-        if re.search(pat, c, re.I):
+        if re.search(pat, full if "DROP" in pat else c, re.I):
             deny(why)
     if re.search(r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*|-[a-zA-Z]*R)", c):
         targets = [t for t in c.split() if not t.startswith("-") and t not in ("rm",)]
         if not targets or not all(re.match(r"^(\./)?qa/out(/|$)|^/tmp/", t) for t in targets):
             deny("recursive delete is allowed only under qa/out")
-    if re.search(r"(>|\btee\b|\bsed\s+-i|\bcp\b|\bmv\b).*docs/research/", c):
+    def writes_to(path_re):
+        # a write operator aimed at the path inside one command segment (reads like `grep … 2>&1` are fine)
+        for seg in re.split(r"\|\||&&|;|\|(?!\|)", c):
+            if re.search(r"(?<![0-9&])>>?\s*\S*" + path_re, seg) or re.search(r"\btee\s+(-a\s+)?\S*" + path_re, seg):
+                return True
+            if re.search(r"\bsed\s+-i\b[^\n]*" + path_re, seg) or re.search(r"\b(touch|truncate|ln)\s[^\n]*" + path_re, seg):
+                return True
+            m = re.search(r"\b(cp|mv|rsync|install)\s+(.*)$", seg)
+            if m and re.search(path_re, m.group(2).split()[-1] if m.group(2).split() else ""):
+                return True
+        return False
+    if writes_to(r"docs/research/"):
         deny("docs/research is owned by Research")
     if re.search(r"\bgit\s+(push|merge)\b", c):
         if not task.endswith(".merge"):
@@ -95,7 +110,8 @@ def main():
         unit = task.split(".")[0]
         if not os.path.exists(os.path.join(root, "docs", "collab", "approvals", "%s_release.md" % unit)):
             deny("no release approval file for %s" % unit)
-    if role == "dev" and re.search(r"(>|\btee\b|\bsed\s+-i|\bcp\b|\bmv\b|\bgit\s+-C)\s*\S*apps/skyui", c):
+    if role == "dev" and (writes_to(r"apps/skyui/") or
+                          re.search(r"\bgit\s+-C\s+\S*apps/skyui\S*\s+(commit|push|merge|rebase|reset|checkout|switch|add|rm|mv|tag|stash|cherry-pick|revert|apply|am)\b", c)):
         deny("EMS Development never changes SkyUI")
     return 0
 

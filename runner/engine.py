@@ -9,6 +9,7 @@ import signal
 import socket
 import subprocess
 import sys
+import glob
 import time
 
 from . import agent, notify
@@ -16,7 +17,7 @@ from .common import (DEFAULT_STATE, Config, Logger, RUNNER_HOME, Store, fmt_dur,
                      write_json)
 from .plan import Project, load_sequence, msg_id, msg_refs, next_unit, unit_by_id
 
-MODEL_KINDS = ("group_design", "phase_plan", "build", "test", "apply", "qa", "docs", "po", "handover",
+MODEL_KINDS = ("group_design", "design_check", "phase_plan", "build", "test", "apply", "qa", "docs", "po", "handover",
                "review", "fix", "merge", "inbox", "skyui")
 PLAN_TASK_KINDS = ("build", "test", "apply", "qa", "docs")
 NO_MODEL = ("gate", "wait_cards", "phase_end", "unit_end")
@@ -108,7 +109,16 @@ class Engine(object):
             return 1
         with open(pidfile, "w") as f:
             f.write(str(os.getpid()))
-        signal.signal(signal.SIGTERM, lambda *a: self._shutdown("SIGTERM"))
+        self._stop = False
+
+        def on_term(*_a):
+            # never leave an agent run orphaned: interrupt it, checkpoint, then exit
+            if self.state().get("current"):
+                self._stop = True
+                self.update_state(interrupt="restart")
+            else:
+                self._shutdown("SIGTERM")
+        signal.signal(signal.SIGTERM, on_term)
         self.log("daemon started (pid %d)" % os.getpid())
         self.recover()
         poll = self.cfg.getint("daemon", "poll_seconds", 10)
@@ -126,6 +136,13 @@ class Engine(object):
                 self.log("runner error: %s\n%s" % (e, traceback.format_exc()), kind="error")
                 self.notify("urgent", "Runner error", str(e)[:300], once_key="err:" + _sig(str(e)))
                 worked = False
+            if getattr(self, "_stop", False):
+                self._shutdown("SIGTERM after checkpoint")
+            self.last_tick = now()  # time spent inside a run is not a sleep gap
+            try:
+                self.maybe_digest()
+            except Exception as e:  # noqa: BLE001
+                self.log("digest failed: %s" % e)
             self.heartbeat()
             self.manage_caffeinate()
             if once and not worked:
@@ -221,6 +238,9 @@ class Engine(object):
         if not task:
             if wait_reason:
                 self.update_state(next_action=wait_reason)
+                if all((t.get("blocked") or {}).get("reason") in ("approval", "card-missing")
+                       for t in self.tasks()["tasks"] if t["status"] == "blocked"):
+                    return False  # each gate already sent its own notice
                 self.notify("urgent" if "approval" in wait_reason or "owner" in wait_reason or "research" in wait_reason else "info",
                             "Waiting", wait_reason, once_key="idle:" + _sig(wait_reason))
             return False
@@ -280,7 +300,12 @@ class Engine(object):
             if nxt.get("design", True):
                 tasks.append(self._task(uid + ".design", "group_design", uid, deps=[prev] if prev else [],
                                         title="Group design %s" % uid))
-                tasks.append(self._task(uid + ".gate.design", "gate", uid, deps=[uid + ".design"], status="pending",
+                gate_dep = uid + ".design"
+                if self.cfg.getbool("auto", "design", False):
+                    tasks.append(self._task(uid + ".design_check", "design_check", uid, deps=[uid + ".design"],
+                                            title="Research check of the %s design (AUTO-Q10)" % uid))
+                    gate_dep = uid + ".design_check"
+                tasks.append(self._task(uid + ".gate.design", "gate", uid, deps=[gate_dep], status="pending",
                                         gate=nxt["gates"]["design"], title="Owner approval: %s" % nxt["gates"]["design"]))
                 prev = uid + ".gate.design"
             for ph in nxt["phases"]:
@@ -444,6 +469,8 @@ class Engine(object):
                     deps_done = all(any(x["id"] == d and x["status"] == "done" for x in data["tasks"]) for d in t["deps"])
                     if not deps_done:
                         continue
+                    if not self.project.approval_ok(t["gate"]) and t["id"].endswith(".gate.release"):
+                        self.try_auto_release(data, t)
                     if self.project.approval_ok(t["gate"]):
                         t["status"] = "done"
                         t["finished"] = now()
@@ -601,6 +628,12 @@ class Engine(object):
                     return self.fail(tid, problem)
                 self.after_done(tid, res)
                 return
+            if task["kind"] == "design_check" and status in ("approve", "owner"):
+                problem = self.verify(task, attempt)
+                if problem:
+                    return self.fail(tid, problem)
+                self.after_done(tid, res)
+                return self.after_design_check(task, res)
             if status == "changes_required" and task["kind"] == "review":
                 return self.review_changes(tid, res)
             if status in ("blocked", "needs_approval", "refused"):
@@ -679,6 +712,113 @@ class Engine(object):
         if self.state().get("service_failures"):
             self.update_state(service_failures=0)
 
+    # ------------------------------------------------------------------ AUTO-Q10 automatic approvals
+    def write_auto_approval(self, unit, kind, evidence):
+        name = "%s_%s.md" % (unit, kind)
+        path = self.project.approval_path(name)
+        if os.path.exists(path):
+            return name
+        owner = self.cfg.get("project", "owner_name", "Monirul Hasan")
+        u = unit_by_id(self.seq, unit) or {"phases": []}
+        text = ("Copyright (c) 2026 Monirul Hasan. All rights reserved.\n"
+                "<!-- Automatic %s approval written by the EMS runner under AUTO-Q10. -->\n\n"
+                "Group %s — %s      Date %s\n"
+                "Approved by: %s — automatic under AUTO-Q10 (owner decision 2026-11-25); the owner reviews it afterwards\n"
+                "Phases: %s\n"
+                "Evidence:\n%s\n"
+                "Undo: tell Research \"revoke %s %s\"; a revoked design goes back to G1 for that group, "
+                "a revoked release is reverted to the previous tag.\n") % (
+            kind, unit, kind, iso()[:10], owner, ", ".join(u["phases"]),
+            "\n".join("- " + e for e in evidence), unit, kind)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        with open(self.project.approval_path("AUTO_LOG.md"), "a", encoding="utf-8") as f:
+            f.write("- %s %s %s — %s\n" % (iso(), unit, kind, "; ".join(evidence)[:300]))
+        self.log("automatic %s approval written: %s" % (kind, name), kind="auto_approval", unit=unit, approval=kind)
+        self.notify("info", "Auto-approved: %s %s" % (unit, kind), "; ".join(evidence)[:300])
+        return name
+
+    def after_design_check(self, task, res):
+        unit = task["unit"]
+        if res.get("status") == "approve":
+            self.write_auto_approval(unit, "design", ["Research check: %s" % (res.get("summary") or "no deviation"),
+                                                     "report docs/reviews/%s_design_check.md" % unit])
+        else:
+            items = res.get("items") or []
+            self.notify("urgent", "Design needs you: %s" % unit,
+                        "The design check found points for your decision: %s. Read docs/reviews/%s_design_check.md, "
+                        "then answer in the Research chat." % ("; ".join(items)[:300] or res.get("summary", ""), unit))
+
+    def try_auto_release(self, data, gate):
+        unit = gate["unit"]
+        if not self.cfg.getbool("auto", "release", False):
+            return False
+        why = []
+        if unit in self.cfg.getlist("auto", "manual_release_units"):
+            why.append("this group is on the always-check list")
+        others = [t for t in data["tasks"] if t["unit"] == unit and t["id"] not in (gate["id"], unit + ".merge", unit + ".end")]
+        notdone = [t["id"] for t in others if t["status"] != "done"]
+        if notdone:
+            why.append("not done: %s" % ", ".join(notdone[:5]))
+        open_skyui = [t["id"] for t in data["tasks"] if t["kind"] == "skyui" and t["status"] != "done"]
+        if open_skyui:
+            why.append("SkyUI work open: %s" % ", ".join(open_skyui))
+        u = unit_by_id(self.seq, unit) or {"phases": []}
+        qa_dir = self.project.p("qa", "out")
+        zips = []
+        for ph in u["phases"]:
+            ok = sorted(glob.glob(os.path.join(qa_dir, "%s_*_OK.zip" % ph)))
+            bad = sorted(glob.glob(os.path.join(qa_dir, "%s_*_ISSUES.zip" % ph)))
+            if not ok or (bad and os.path.getmtime(bad[-1]) >= os.path.getmtime(ok[-1])):
+                why.append("%s has no clean QA zip" % ph)
+            else:
+                zips.append(os.path.basename(ok[-1]))
+        if why:
+            self.notify("urgent", "Release needs you: %s" % unit, "Not released automatically: %s. Look with: ems review %s" % ("; ".join(why), unit),
+                        once_key="relman:" + unit)
+            return False
+        rounds = len([t for t in data["tasks"] if t["unit"] == unit and t["kind"] == "review"])
+        self.write_auto_approval(unit, "release", ["independent review clean (docs/reviews/%s.md, %d round(s))" % (unit, rounds),
+                                                   "all tasks verified by the runner", "QA: " + ", ".join(zips)])
+        return True
+
+    def maybe_digest(self):
+        hhmm = self.cfg.get("notify", "digest_time", "08:00")
+        if not hhmm:
+            return
+        import datetime as _dt
+        t = _dt.datetime.now()
+        h, m = [int(x) for x in hhmm.split(":")]
+        if (t.hour, t.minute) < (h, m):
+            return
+        st = self.state()
+        today = t.strftime("%Y-%m-%d")
+        if st.get("last_digest") == today:
+            return
+        since = st.get("last_digest_ts") or (now() - 86400)
+        done, autos, blocked = 0, [], []
+        path = os.path.join(self.cfg.var_dir, "logs", "events.jsonl")
+        if os.path.exists(path):
+            for line in open(path, encoding="utf-8"):
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("ts", 0) < since:
+                    continue
+                if e.get("kind") == "task_done":
+                    done += 1
+                if e.get("kind") == "auto_approval":
+                    autos.append("%s %s" % (e.get("unit"), e.get("approval")))
+        for tk in self.tasks()["tasks"]:
+            if tk["status"] == "blocked":
+                blocked.append("%s (%s)" % (tk["id"], (tk.get("blocked") or {}).get("reason")))
+        self.update_state(last_digest=today, last_digest_ts=now())
+        body = "Tasks done: %d. Auto-approved: %s. Waiting on you: %s. Mode: %s." % (
+            done, ", ".join(autos) or "none", ", ".join(blocked) or "nothing", st["mode"])
+        self.notify("info", "Daily summary", body)
+
     def verify(self, task, attempt):
         """The runner checks results itself; it never takes the agent's word for 'done'."""
         root = self.project.root
@@ -689,6 +829,8 @@ class Engine(object):
             need.append(os.path.join(root, "docs", "design", "%s.md" % task["unit"]))
         if kind == "review":
             need.append(os.path.join(root, "docs", "reviews", "%s.md" % task["unit"]))
+        if kind == "design_check":
+            need.append(os.path.join(root, "docs", "reviews", "%s_design_check.md" % task["unit"]))
         if kind == "handover":
             need.append(os.path.join(root, "docs", "HANDOVER.md"))
         if kind == "phase_plan":

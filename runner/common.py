@@ -71,7 +71,7 @@ class Config:
     """config.ini in the runner folder, overridden by the local file outside the repo."""
 
     def __init__(self):
-        cp = configparser.ConfigParser(interpolation=None)
+        cp = configparser.ConfigParser(interpolation=None, strict=False)
         cp.read(os.path.join(RUNNER_HOME, "config.ini"))
         local = os.environ.get("EMS_RUNNER_LOCAL", "~/.skysoft/ems-runner.ini")
         cp.read(expand(local))

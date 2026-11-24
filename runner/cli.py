@@ -312,7 +312,7 @@ def cmd_telegram_chat_id(eng, a):
 
 def cmd_selftest(eng, a):
     test = os.path.join(RUNNER_HOME, "tests", "selftest.py")
-    print("Running 22 sandbox tests with a fake agent (no usage). This takes about 1-2 minutes;\n"
+    print("Running the sandbox tests with a fake agent (no usage). This takes about 1-2 minutes;\n"
           "a few tests deliberately wait 3-30 seconds. Please let it finish.\n", flush=True)
     return subprocess.call([sys.executable, "-W", "ignore", test, "-v"])
 
@@ -320,6 +320,72 @@ def cmd_selftest(eng, a):
 def cmd_progress(eng, a):
     eng.write_progress()
     print(open(eng.store.path("PROGRESS.md")).read())
+
+
+def cmd_watch(eng, a):
+    """Readable live view of the current run: which files it reads, edits and which commands it runs."""
+    import glob as _g
+    shown = None
+    pos = 0
+    try:
+        while True:
+            st = eng.state()
+            cur = st.get("current")
+            path = cur and cur.get("log")
+            if not path:
+                runs = sorted(_g.glob(os.path.join(eng.cfg.var_dir, "logs", "runs", "*.jsonl")))
+                path = runs[-1] if runs else None
+            if path != shown:
+                shown, pos = path, 0
+                print("\n=== %s ===" % (os.path.basename(path) if path else "no run yet"), flush=True)
+            if path and os.path.exists(path):
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    f.seek(pos)
+                    for line in f:
+                        try:
+                            ev = json.loads(line)
+                        except ValueError:
+                            continue
+                        if ev.get("type") == "assistant":
+                            for b in (ev.get("message") or {}).get("content") or []:
+                                if b.get("type") == "tool_use":
+                                    i = b.get("input") or {}
+                                    what = i.get("command") or i.get("file_path") or i.get("pattern") or i.get("url") or i.get("description") or ""
+                                    print("  %-8s %s" % (b.get("name"), str(what).replace("\n", " ")[:150]), flush=True)
+                                elif b.get("type") == "text" and b.get("text", "").strip():
+                                    print("  · " + b["text"].strip().replace("\n", " ")[:200], flush=True)
+                        elif ev.get("type") == "result":
+                            print("  ✔ run finished: %s" % (ev.get("result") or "")[-200:].replace("\n", " "), flush=True)
+                    pos = f.tell()
+            if not a.follow:
+                return
+            time.sleep(2)
+    except KeyboardInterrupt:
+        return
+
+
+def cmd_open(eng, a):
+    root = eng.cfg.project_root
+    target = {"screens": os.path.join(root, "qa", "out"), "designs": os.path.join(root, "docs", "design"),
+              "reviews": os.path.join(root, "docs", "reviews"), "approvals": os.path.join(root, "docs", "collab", "approvals"),
+              "progress": eng.store.path("PROGRESS.md")}[a.what]
+    if a.what == "progress":
+        eng.write_progress()
+    subprocess.run(["open", target], check=False)
+    print("opened %s" % target)
+
+
+def cmd_review(eng, a):
+    from .review import build
+    from .plan import unit_by_id
+    u = unit_by_id(eng.seq, a.unit)
+    if not u:
+        print("unknown group %s" % a.unit)
+        return 1
+    out = build(eng.cfg.project_root, u["phases"], a.unit)
+    print("review page: %s" % out)
+    if not a.no_open:
+        subprocess.run(["open", out], check=False)
 
 
 def main(argv=None):
@@ -370,6 +436,16 @@ def main(argv=None):
     s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_selftest)
     sub.add_parser("progress", help="print the progress table").set_defaults(fn=cmd_progress)
+    s = sub.add_parser("watch", help="live, readable view of what the current run is doing")
+    s.add_argument("--once", dest="follow", action="store_false")
+    s.set_defaults(fn=cmd_watch, follow=True)
+    s = sub.add_parser("review", help="one review page for a group: problems, one picture per screen, key variants")
+    s.add_argument("unit")
+    s.add_argument("--no-open", action="store_true")
+    s.set_defaults(fn=cmd_review)
+    s = sub.add_parser("open", help="open screenshots, designs, reviews, approvals or progress in Finder")
+    s.add_argument("what", choices=["screens", "designs", "reviews", "approvals", "progress"])
+    s.set_defaults(fn=cmd_open)
     sub.add_parser("daemon", help="run the daemon in the foreground (launchd uses this)").set_defaults(
         fn=lambda eng, a: eng.daemon())
     a = ap.parse_args(argv)

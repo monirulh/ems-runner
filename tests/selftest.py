@@ -32,7 +32,7 @@ def msg(frm, to, about, kind=None, needs="yes", blocking="no", body="text"):
 
 
 class Sandbox(object):
-    def __init__(self, script, units=None):
+    def __init__(self, script, units=None, auto=False):
         self.dir = tempfile.mkdtemp(prefix="ems_sandbox_")
         self.root = os.path.join(self.dir, "project")
         self.var = os.path.join(self.dir, "var")
@@ -59,7 +59,9 @@ class Sandbox(object):
         os.chmod(cli, 0o755)
         local = os.path.join(self.dir, "local.ini")
         open(local, "w").write("[notify]\ndry_run = yes\n[daemon]\nkeep_awake = no\npoll_seconds = 1\n"
-                               "[session]\ngrace_minutes = 0\n[limits]\nprobe_host = 127.0.0.1\n")
+                               "[session]\ngrace_minutes = 0\n[limits]\nprobe_host = 127.0.0.1\n"
+                               "[auto]\ndesign = %s\nrelease = %s\nmanual_release_units = GX2\n"
+                               "[notify]\ndigest_time =\n" % (("yes", "yes") if auto else ("no", "no")))
         os.environ.update({
             "EMS_PROJECT_ROOT": self.root, "EMS_RUNNER_VAR": self.var, "EMS_SEQUENCE_FILE": seq,
             "EMS_RUNNER_LOCAL": local, "EMS_SECRETS_FILE": os.path.join(self.dir, "nosecrets"),
@@ -342,6 +344,38 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(sb.eng.tasks()["unit"], "GX1", "GX2 does not start")
         self.assertTrue(any(e["title"] == "Plan file changed" for e in sb.events("notify")))
 
+    def test_23_auto_design_and_release(self):
+        self.sb = sb = Sandbox({r"GX1\.design_check": ["approve"]}, auto=True)
+        sb.run()
+        self.assertTrue(os.path.exists(sb.c("approvals", "GX1_design.md")), "clean check writes the design approval")
+        self.assertIn("automatic under AUTO-Q10", open(sb.c("approvals", "GX1_design.md")).read())
+        self.assertEqual(sb.status("GX1.review"), "done", "build ran without stopping")
+        self.assertEqual(sb.status("GX1.gate.release"), "blocked", "no clean QA zips yet, so release waits")
+        qa = os.path.join(sb.root, "qa", "out")
+        os.makedirs(qa)
+        for ph in ("P901", "P902"):
+            open(os.path.join(qa, "%s_20261125_0100_OK.zip" % ph), "w").write("z")
+        sb.run()
+        self.assertTrue(os.path.exists(sb.c("approvals", "GX1_release.md")))
+        self.assertEqual(sb.status("GX1.end"), "done")
+        self.assertEqual(sb.eng.tasks()["unit"], "GX2")
+
+    def test_24_design_check_needs_owner_and_manual_release(self):
+        self.sb = sb = Sandbox({r"GX1\.design_check": ["owner"]}, auto=True)
+        sb.run()
+        self.assertFalse(os.path.exists(sb.c("approvals", "GX1_design.md")))
+        self.assertEqual(sb.status("GX1.gate.design"), "blocked")
+        self.assertTrue(any(e["title"].startswith("Design needs you") for e in sb.events("notify")))
+        sb.approve("GX1_design.md")
+        sb.run()
+        os.makedirs(os.path.join(sb.root, "qa", "out"))
+        for ph in ("P901", "P902"):
+            open(os.path.join(sb.root, "qa", "out", "%s_x_OK.zip" % ph), "w").write("z")
+        open(os.path.join(sb.root, "qa", "out", "P902_y_ISSUES.zip"), "w").write("z")
+        sb.run()
+        self.assertFalse(os.path.exists(sb.c("approvals", "GX1_release.md")), "a newer ISSUES zip stops auto release")
+        self.assertTrue(any(e["title"] == "Release needs you: GX1" for e in sb.events("notify")))
+
     def test_20_reset_time_parsing(self):
         import datetime as dt
         ref = dt.datetime(2026, 11, 25, 14, 0).timestamp()
@@ -386,6 +420,17 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(B("ls docs/collab/approvals"), 0)
         self.assertEqual(B("cat ~/.skysoft/secrets.env"), 2)
         self.assertEqual(B("git status && npm test"), 0)
+        self.assertEqual(B("git -C apps/skyui log --oneline -1 2>&1; grep -n x docs/research/INDEX.md | head"), 0)
+        self.assertEqual(B("ls x 2>&1 | head; grep -n y docs/research/a.md"), 0)
+        self.assertEqual(B("echo hi > docs/research/a.md"), 2)
+        self.assertEqual(B("cp notes.md docs/research/"), 2)
+        self.assertEqual(B("cp docs/research/INDEX.md /tmp/x.md"), 0)
+        self.assertEqual(B("git -C apps/skyui commit -am x"), 2)
+        self.assertEqual(B("cat > infra/p000/hooks/pre_file.py <<'EOF'\nDENY = ['source_snapshot/education/']\nEOF"), 0)
+        self.assertEqual(B("grep -r x source_snapshot/education/"), 2)
+        self.assertEqual(B("cd source_snapshot/education && ls"), 2)
+        self.assertEqual(B("mysql <<'SQL'\nDROP TABLE tabX;\nSQL"), 2)
+        self.assertEqual(B("sed -i s/a/b/ apps/skyui/x.css"), 2)
         self.assertEqual(g("Write", {"file_path": "docs/collab/approvals/G01_release.md"}), 2)
         self.assertEqual(g("Edit", {"file_path": "docs/research/EMS_Development_Guide.md"}), 2)
         self.assertEqual(g("Edit", {"file_path": "docs/collab/to-dev/old.md"}), 2)

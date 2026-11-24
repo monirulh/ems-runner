@@ -32,7 +32,7 @@ def send(cfg, log, level, title, body=""):
     if cfg.getbool("notify", "macos", True) and lvl >= _min_level(cfg, "macos", "info") and shutil.which("osascript"):
         script = 'display notification "%s" with title "EMS runner" subtitle "%s"%s' % (
             _esc_applescript(body[:200]), _esc_applescript(title[:100]),
-            ' sound name "Glass"' if level == "urgent" else "")
+            ' sound name "Glass"' if (level == "urgent" and cfg.getbool("notify", "macos_sound", False)) else "")
         try:
             subprocess.run(["osascript", "-e", script], timeout=10, check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

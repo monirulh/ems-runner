@@ -48,7 +48,11 @@ def main():
 
     def write_outputs():
         unit = task.split(".")[0]
-        if ".design" in task and ".gate" not in task:
+        if task.endswith(".design_check"):
+            p = os.path.join(root, "docs", "reviews", unit + "_design_check.md")
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").write("check\n")
+        elif ".design" in task and ".gate" not in task:
             p = os.path.join(root, "docs", "design", unit + ".md")
             os.makedirs(os.path.dirname(p), exist_ok=True)
             open(p, "w").write("# design %s\n" % unit)
@@ -87,6 +91,12 @@ def main():
         return result('EMS_RESULT {"status": "blocked", "reason": "%s", "waiting_for": "%s", "summary": "need help"}' % (reason, waiting))
     if kind == "needs_approval":
         return result('EMS_RESULT {"status": "needs_approval", "waiting_for": "%s", "summary": "breaking"}' % step.split(":", 1)[1])
+    if kind == "approve":
+        write_outputs()
+        return result('EMS_RESULT {"status": "approve", "summary": "no deviation"}')
+    if kind == "owner":
+        write_outputs()
+        return result('EMS_RESULT {"status": "owner", "summary": "needs owner", "items": ["OQ-1 new scope"]}')
     if kind == "refused":
         return result('EMS_RESULT {"status": "refused", "summary": "out of scope: page"}')
     if kind == "limit":
