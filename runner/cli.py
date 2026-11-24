@@ -290,7 +290,24 @@ def cmd_telegram_chat_id(eng, a):
     if not token:
         print("Put TELEGRAM_BOT_TOKEN in ~/.skysoft/secrets.env first, then send any message to your bot.")
         return 1
-    print("chat ids that messaged the bot:", notify.telegram_find_chat_id(token))
+    import urllib.error
+    try:
+        ids = notify.telegram_find_chat_id(token)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 404):
+            print("Telegram rejected the bot token (HTTP %d). It is wrong, incomplete or revoked: copy the newest "
+                  "token from @BotFather and write it again to ~/.skysoft/secrets.env." % e.code)
+        else:
+            print("Telegram error HTTP %d; try again in a minute." % e.code)
+        return 1
+    except OSError as e:
+        print("Cannot reach Telegram: %s" % type(e).__name__)
+        return 1
+    if not ids:
+        print("The token works, but no messages yet: send your bot any message in Telegram, then run this again.")
+        return 1
+    print("Chat id(s) that messaged the bot: %s" % ", ".join(str(i) for i in ids))
+    print("Add it with:  echo 'TELEGRAM_CHAT_ID=%s' >> ~/.skysoft/secrets.env" % ids[0])
 
 
 def cmd_selftest(eng, a):
