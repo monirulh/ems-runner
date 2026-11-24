@@ -378,11 +378,26 @@ def cmd_open(eng, a):
 def cmd_review(eng, a):
     from .review import build
     from .plan import unit_by_id
-    u = unit_by_id(eng.seq, a.unit)
-    if not u:
-        print("unknown group %s" % a.unit)
-        return 1
-    out = build(eng.cfg.project_root, u["phases"], a.unit)
+    import glob as _g
+    import re as _re
+    target = a.unit.strip()
+    if target.lower() in ("last", "latest"):
+        runs = [d for d in _g.glob(os.path.join(eng.cfg.project_root, "qa", "out", "P[0-9][0-9][0-9]_*")) if os.path.isdir(d)]
+        if not runs:
+            print("no QA run yet")
+            return 1
+        phase = os.path.basename(max(runs, key=os.path.getmtime))[:4]
+        phases, label = [phase], phase
+    elif _re.fullmatch(r"[Pp]\d{3}(\.\w+)?", target):
+        phase = target[:4].upper()
+        phases, label = [phase], phase
+    else:
+        u = unit_by_id(eng.seq, target)
+        if not u:
+            print("unknown group or phase %s (use e.g. G01, P003 or last)" % target)
+            return 1
+        phases, label = u["phases"], target
+    out = build(eng.cfg.project_root, phases, label)
     print("review page: %s" % out)
     if not a.no_open:
         subprocess.run(["open", out], check=False)
@@ -439,7 +454,7 @@ def main(argv=None):
     s = sub.add_parser("watch", help="live, readable view of what the current run is doing")
     s.add_argument("--once", dest="follow", action="store_false")
     s.set_defaults(fn=cmd_watch, follow=True)
-    s = sub.add_parser("review", help="one review page for a group: problems, one picture per screen, key variants")
+    s = sub.add_parser("review", help="review page for a group (G01), a phase (P003) or the newest QA run (last)")
     s.add_argument("unit")
     s.add_argument("--no-open", action="store_true")
     s.set_defaults(fn=cmd_review)
