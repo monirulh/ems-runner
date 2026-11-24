@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright (c) 2026 Monirul Hasan. All rights reserved. -->
+<!-- launchd agent that keeps the EMS runner daemon alive across crashes, logouts and reboots. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.skysoft.ems-runner</string>
+  <key>ProgramArguments</key>
+  <array><string>{PYTHON}</string><string>-m</string><string>runner.engine</string></array>
+  <key>WorkingDirectory</key><string>{RUNNER_HOME}</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>{PATH}</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>{VAR}/logs/daemon.out</string>
+  <key>StandardErrorPath</key><string>{VAR}/logs/daemon.out</string>
+</dict>
+</plist>

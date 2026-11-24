@@ -1,0 +1,6 @@
+#!/bin/bash
+# Copyright (c) 2026 Monirul Hasan. All rights reserved.
+# Entry point for the EMS runner command (`ems status`, `ems start --for 5h`, ...).
+HERE="$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd)"
+[ -f "$HERE/runner/cli.py" ] || HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE" && exec python3 -m runner.cli "$@"

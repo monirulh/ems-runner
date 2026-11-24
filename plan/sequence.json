@@ -1,0 +1,532 @@
+{
+ "_about": "Copyright (c) 2026 Monirul Hasan. All rights reserved. Order of work units for the EMS runner, taken from EMS_Phase_List_Master.md v11 (PLAN-FULL-APPROVE) and EMS_Phase_List_R1lite.md v16. Research changes this file only with a labelled correction message.",
+ "source": "docs/research/EMS_Phase_List_Master.md v11",
+ "units": [
+  {
+   "id": "G00",
+   "phases": [
+    "P000"
+   ],
+   "gates": {
+    "design": "G00_design.md",
+    "release": "G00_release.md"
+   },
+   "design_prompt": "docs/collab/prompts/P000.md"
+  },
+  {
+   "id": "G01",
+   "phases": [
+    "P001",
+    "P002",
+    "P003",
+    "P004"
+   ],
+   "gates": {
+    "design": "G01_design.md",
+    "release": "G01_release.md"
+   }
+  },
+  {
+   "id": "G02",
+   "phases": [
+    "P005",
+    "P006",
+    "P007",
+    "P008",
+    "P025"
+   ],
+   "gates": {
+    "design": "G02_design.md",
+    "release": "G02_release.md"
+   }
+  },
+  {
+   "id": "G03",
+   "phases": [
+    "P009",
+    "P010",
+    "P011",
+    "P012",
+    "P027"
+   ],
+   "gates": {
+    "design": "G03_design.md",
+    "release": "G03_release.md"
+   }
+  },
+  {
+   "id": "G04",
+   "phases": [
+    "P013",
+    "P014",
+    "P015",
+    "P016"
+   ],
+   "gates": {
+    "design": "G04_design.md",
+    "release": "G04_release.md"
+   }
+  },
+  {
+   "id": "G05",
+   "phases": [
+    "P017",
+    "P018",
+    "P019",
+    "P020"
+   ],
+   "gates": {
+    "design": "G05_design.md",
+    "release": "G05_release.md"
+   }
+  },
+  {
+   "id": "G06",
+   "phases": [
+    "P021",
+    "P022",
+    "P023",
+    "P028"
+   ],
+   "gates": {
+    "design": "G06_design.md",
+    "release": "G06_release.md"
+   }
+  },
+  {
+   "id": "G06b",
+   "phases": [
+    "P033",
+    "P034",
+    "P035",
+    "P036",
+    "P024"
+   ],
+   "gates": {
+    "design": "G06b_design.md",
+    "release": "G06b_release.md"
+   }
+  },
+  {
+   "id": "G07a",
+   "phases": [
+    "P026",
+    "P037",
+    "P029"
+   ],
+   "gates": {
+    "design": "G07a_design.md",
+    "release": "G07a_release.md"
+   }
+  },
+  {
+   "id": "G07b",
+   "phases": [
+    "P030",
+    "P031",
+    "P032"
+   ],
+   "gates": {
+    "design": "G07b_design.md",
+    "release": "G07b_release.md"
+   }
+  },
+  {
+   "id": "P050",
+   "phases": [
+    "P050"
+   ],
+   "gates": {
+    "design": "P050_design.md",
+    "release": "P050_release.md"
+   },
+   "note": "One-phase release first after G07b (OI-A5-1). Gate file names to be confirmed by Research when P050 is carded."
+  },
+  {
+   "id": "G08",
+   "phases": [
+    "P038",
+    "P039",
+    "P040",
+    "P041"
+   ],
+   "gates": {
+    "design": "G08_design.md",
+    "release": "G08_release.md"
+   }
+  },
+  {
+   "id": "G09",
+   "phases": [
+    "P042",
+    "P043",
+    "P044"
+   ],
+   "gates": {
+    "design": "G09_design.md",
+    "release": "G09_release.md"
+   }
+  },
+  {
+   "id": "G10",
+   "phases": [
+    "P045",
+    "P046",
+    "P047",
+    "P048",
+    "P148"
+   ],
+   "gates": {
+    "design": "G10_design.md",
+    "release": "G10_release.md"
+   }
+  },
+  {
+   "id": "G11",
+   "phases": [
+    "P049",
+    "P051",
+    "P052",
+    "P053"
+   ],
+   "gates": {
+    "design": "G11_design.md",
+    "release": "G11_release.md"
+   }
+  },
+  {
+   "id": "G12",
+   "phases": [
+    "P054",
+    "P055",
+    "P056",
+    "P057",
+    "P058"
+   ],
+   "gates": {
+    "design": "G12_design.md",
+    "release": "G12_release.md"
+   }
+  },
+  {
+   "id": "G13",
+   "phases": [
+    "P059",
+    "P060",
+    "P061",
+    "P149",
+    "P062"
+   ],
+   "gates": {
+    "design": "G13_design.md",
+    "release": "G13_release.md"
+   }
+  },
+  {
+   "id": "G14",
+   "phases": [
+    "P063",
+    "P064",
+    "P065",
+    "P066"
+   ],
+   "gates": {
+    "design": "G14_design.md",
+    "release": "G14_release.md"
+   }
+  },
+  {
+   "id": "G15",
+   "phases": [
+    "P067",
+    "P068",
+    "P069",
+    "P070"
+   ],
+   "gates": {
+    "design": "G15_design.md",
+    "release": "G15_release.md"
+   }
+  },
+  {
+   "id": "G16",
+   "phases": [
+    "P071",
+    "P072",
+    "P073",
+    "P150",
+    "P074"
+   ],
+   "gates": {
+    "design": "G16_design.md",
+    "release": "G16_release.md"
+   }
+  },
+  {
+   "id": "G17",
+   "phases": [
+    "P075",
+    "P076",
+    "P077"
+   ],
+   "gates": {
+    "design": "G17_design.md",
+    "release": "G17_release.md"
+   }
+  },
+  {
+   "id": "G18",
+   "phases": [
+    "P078",
+    "P079",
+    "P080"
+   ],
+   "gates": {
+    "design": "G18_design.md",
+    "release": "G18_release.md"
+   }
+  },
+  {
+   "id": "G19",
+   "phases": [
+    "P081",
+    "P082",
+    "P083",
+    "P084",
+    "P085"
+   ],
+   "gates": {
+    "design": "G19_design.md",
+    "release": "G19_release.md"
+   }
+  },
+  {
+   "id": "G20",
+   "phases": [
+    "P086",
+    "P087",
+    "P088",
+    "P151"
+   ],
+   "gates": {
+    "design": "G20_design.md",
+    "release": "G20_release.md"
+   }
+  },
+  {
+   "id": "G21",
+   "phases": [
+    "P089",
+    "P090",
+    "P091",
+    "P092",
+    "P152"
+   ],
+   "gates": {
+    "design": "G21_design.md",
+    "release": "G21_release.md"
+   }
+  },
+  {
+   "id": "G22",
+   "phases": [
+    "P093",
+    "P094",
+    "P095"
+   ],
+   "gates": {
+    "design": "G22_design.md",
+    "release": "G22_release.md"
+   }
+  },
+  {
+   "id": "G23",
+   "phases": [
+    "P096",
+    "P097",
+    "P098"
+   ],
+   "gates": {
+    "design": "G23_design.md",
+    "release": "G23_release.md"
+   }
+  },
+  {
+   "id": "G24",
+   "phases": [
+    "P099",
+    "P100",
+    "P101"
+   ],
+   "gates": {
+    "design": "G24_design.md",
+    "release": "G24_release.md"
+   }
+  },
+  {
+   "id": "G25",
+   "phases": [
+    "P102",
+    "P103",
+    "P104",
+    "P105"
+   ],
+   "gates": {
+    "design": "G25_design.md",
+    "release": "G25_release.md"
+   }
+  },
+  {
+   "id": "G26",
+   "phases": [
+    "P106",
+    "P107",
+    "P108",
+    "P109",
+    "P110"
+   ],
+   "gates": {
+    "design": "G26_design.md",
+    "release": "G26_release.md"
+   }
+  },
+  {
+   "id": "G27",
+   "phases": [
+    "P111",
+    "P112",
+    "P113",
+    "P114"
+   ],
+   "gates": {
+    "design": "G27_design.md",
+    "release": "G27_release.md"
+   }
+  },
+  {
+   "id": "G28",
+   "phases": [
+    "P115",
+    "P116",
+    "P117"
+   ],
+   "gates": {
+    "design": "G28_design.md",
+    "release": "G28_release.md"
+   }
+  },
+  {
+   "id": "G29",
+   "phases": [
+    "P118",
+    "P119",
+    "P120"
+   ],
+   "gates": {
+    "design": "G29_design.md",
+    "release": "G29_release.md"
+   }
+  },
+  {
+   "id": "G30",
+   "phases": [
+    "P121",
+    "P122",
+    "P123",
+    "P124"
+   ],
+   "gates": {
+    "design": "G30_design.md",
+    "release": "G30_release.md"
+   }
+  },
+  {
+   "id": "G31",
+   "phases": [
+    "P125",
+    "P126",
+    "P127",
+    "P153"
+   ],
+   "gates": {
+    "design": "G31_design.md",
+    "release": "G31_release.md"
+   }
+  },
+  {
+   "id": "G32",
+   "phases": [
+    "P128",
+    "P129",
+    "P130",
+    "P131"
+   ],
+   "gates": {
+    "design": "G32_design.md",
+    "release": "G32_release.md"
+   }
+  },
+  {
+   "id": "G33",
+   "phases": [
+    "P132",
+    "P133",
+    "P134",
+    "P135"
+   ],
+   "gates": {
+    "design": "G33_design.md",
+    "release": "G33_release.md"
+   }
+  },
+  {
+   "id": "G34",
+   "phases": [
+    "P136",
+    "P137",
+    "P138"
+   ],
+   "gates": {
+    "design": "G34_design.md",
+    "release": "G34_release.md"
+   }
+  },
+  {
+   "id": "G35",
+   "phases": [
+    "P139",
+    "P140",
+    "P141"
+   ],
+   "gates": {
+    "design": "G35_design.md",
+    "release": "G35_release.md"
+   }
+  },
+  {
+   "id": "G36",
+   "phases": [
+    "P142",
+    "P154",
+    "P143",
+    "P144"
+   ],
+   "gates": {
+    "design": "G36_design.md",
+    "release": "G36_release.md"
+   }
+  },
+  {
+   "id": "G37",
+   "phases": [
+    "P145",
+    "P146",
+    "P147"
+   ],
+   "gates": {
+    "design": "G37_design.md",
+    "release": "G37_release.md"
+   }
+  }
+ ]
+}
