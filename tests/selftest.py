@@ -371,6 +371,23 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(sb.status("research-2026-11-26_016"), "done")
         self.assertEqual(sb.status("P901.t01"), "done")
 
+    def test_28_research_catch_up_for_waiting_question(self):
+        q = "2026-11-26_019_Q-old.md"
+        self.sb = sb = Sandbox({r"P901\.t01": ["blocked:question:%s" % q, "done"],
+                                r"research-2026-11-26_019": ["done"]})
+        sb.run()
+        sb.approve("GX1_design.md")
+        sb.run()
+        open(sb.c("to-research", q), "w").write(msg("Dev", "Research", "P901.t01", blocking="yes"))
+        sb.run()
+        self.assertIsNone(sb.task("research-2026-11-26_019"), "research off: nothing queued")
+        with open(os.environ["EMS_RUNNER_LOCAL"], "a") as f:
+            f.write("[auto]\nresearch = yes\n")
+        sb.eng.cfg = Config()
+        sb.run()
+        self.assertEqual(sb.status("research-2026-11-26_019"), "done")
+        self.assertEqual(sb.status("P901.t01"), "done")
+
     def test_27_research_off_only_notifies(self):
         q = "2026-11-26_018_Q-x.md"
         self.sb = sb = Sandbox({})

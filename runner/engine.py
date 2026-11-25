@@ -232,6 +232,7 @@ class Engine(object):
             return False
 
         self.scan_messages()
+        self.catch_up_research()
         self.refresh_blocked()
         self.ensure_unit()
         task, wait_reason = self.pick()
@@ -446,6 +447,31 @@ class Engine(object):
             self.save_tasks(data)
         if any(new.values()):
             self.log("messages: %s" % {k: v for k, v in new.items() if v}, kind="messages")
+
+    def catch_up_research(self):
+        """AUTO-Q11: a task waiting on a question that no Research run handles gets one (e.g. after a restart)."""
+        if not self.cfg.getbool("auto", "research", False):
+            return
+        with self.store.locked():
+            data = self.tasks()
+            have = {t.get("request") for t in data["tasks"] if t["kind"] == "research"}
+            added = []
+            for t in data["tasks"]:
+                b = t.get("blocked") or {}
+                if t["status"] != "blocked" or b.get("reason") != "question":
+                    continue
+                name = os.path.basename(str(b.get("waiting_for") or ""))
+                if not name or name in have or not os.path.exists(os.path.join(self.project.collab, "to-research", name)):
+                    continue
+                data["tasks"].append(self._task("research-%s" % msg_id(name), "research", data.get("unit"), priority=20,
+                                                request=name, title="Research answers %s" % name))
+                have.add(name)
+                added.append(name)
+            if added:
+                self.save_tasks(data)
+        for name in added:
+            self.log("research run queued for %s (catch-up)" % name)
+            self.notify("info", "Research answering automatically", name)
 
     def _to_backlog(self, name, kind):
         src = os.path.join(self.project.collab, "to-dev", name)
