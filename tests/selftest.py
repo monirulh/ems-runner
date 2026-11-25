@@ -577,5 +577,121 @@ class RunnerTests(unittest.TestCase):
         shutil.rmtree(root)
 
 
+
+class FakeTelegram(object):
+    def __init__(self):
+        self.sent, self.updates, self.mid = [], [], 100
+
+    def call(self, method, params):
+        if method == "sendMessage":
+            self.mid += 1
+            self.sent.append(dict(params, message_id=self.mid))
+            return {"result": {"message_id": self.mid}}
+        if method == "getUpdates":
+            off = int(params.get("offset", 0))
+            return {"result": [u for u in self.updates if u["update_id"] >= off]}
+        return {}
+
+
+A, B, STRANGER = "5014180525", "8926898835", "999"
+
+
+class ConsentTests(unittest.TestCase):
+    def tearDown(self):
+        if getattr(self, "sb", None):
+            self.sb.close()
+
+    def gate(self, on=True):
+        self.sb = sb = Sandbox({})
+        self.tg = FakeTelegram()
+        c = sb.eng.consent
+        c._client = self.tg
+        c.enabled = lambda: on
+        c.ids = lambda: [A, B]
+        sb.eng.cfg.getint  # noqa: B018 (config object exists)
+        sb.run()
+        return sb
+
+    def reply(self, uid, sender, text, reply_to=None):
+        m = {"from": {"id": int(sender)}, "text": text, "message_id": uid}
+        if reply_to:
+            m["reply_to_message"] = {"message_id": reply_to}
+        self.tg.updates.append({"update_id": uid, "message": m})
+
+    def answers(self, sb):
+        return [f for f in os.listdir(sb.c("to-research")) if "Q-consent" in f]
+
+    def test_33_brief_goes_to_both_ids_in_parts(self):
+        sb = self.gate()
+        self.assertEqual(sb.status("GX1.gate.design"), "blocked")
+        chats = {m["chat_id"] for m in self.tg.sent}
+        self.assertEqual(chats, {A, B})
+        self.assertTrue(all(len(m["text"]) <= 4096 for m in self.tg.sent))
+        self.assertIn("CONSENT NEEDED GX1-design", self.tg.sent[0]["text"])
+        self.assertIn("reply_markup", self.tg.sent[0])
+
+    def test_34_long_brief_is_split_under_limit(self):
+        from runner.consent import split_parts
+        parts = split_parts(("line of text\n" * 2000) + "x" * 9000)
+        self.assertGreater(len(parts), 3)
+        self.assertTrue(all(len(p) < 4096 for p in parts))
+
+    def test_35_valid_reply_writes_one_answer_then_second_is_rejected(self):
+        sb = self.gate()
+        head = self.tg.sent[0]["message_id"]
+        before = sorted(os.listdir(sb.c("to-research")))
+        self.reply(1, A, "1", reply_to=head)
+        self.reply(2, B, "/approve GX1-design 2")
+        sb.eng.consent.poll(force=True)
+        new = [f for f in os.listdir(sb.c("to-research")) if f not in before]
+        self.assertEqual(len(new), 1)
+        text = open(sb.c("to-research", new[0])).read()
+        self.assertIn("Kind: answer", text)
+        self.assertIn("option 1", text)
+        self.assertIn("From: Runner      To: Research", text)
+        self.assertEqual(sorted(os.listdir(sb.c("to-research")))[:len(before)], before)
+
+    def test_36_other_senders_option_and_code_are_rejected(self):
+        sb = self.gate()
+        head = self.tg.sent[0]["message_id"]
+        self.reply(1, STRANGER, "1", reply_to=head)
+        self.reply(2, A, "/approve GX1-design 9")
+        self.reply(3, A, "/approve NOPE-design 1")
+        self.reply(4, A, "approve everything")
+        sb.eng.consent.poll(force=True)
+        self.assertEqual(self.answers(sb), [])
+
+    def test_37_button_tap_counts_and_restart_does_not_reprocess(self):
+        sb = self.gate()
+        self.tg.updates.append({"update_id": 7, "callback_query": {"from": {"id": int(B)}, "data": "c|GX1-design|2",
+                                                                      "message": {"message_id": 1}}})
+        sb.eng.consent.poll(force=True)
+        self.assertEqual(len(self.answers(sb)), 1)
+        self.assertEqual(sb.eng.consent.state()["offset"], 8)
+        for f in self.answers(sb):  # even with the file gone, a restarted listener must not answer again
+            pass
+        from runner.consent import Consent
+        c2 = Consent(sb.eng.cfg, sb.eng.store, sb.eng.log, sb.eng.project, client=self.tg)
+        c2.enabled = lambda: True
+        c2.ids = lambda: [A, B]
+        c2.poll(force=True)
+        self.assertEqual(len(self.answers(sb)), 1)
+
+    def test_38_task_resumes_when_approval_file_appears(self):
+        sb = self.gate()
+        self.reply(1, A, "/approve GX1-design 1")
+        sb.eng.consent.poll(force=True)
+        self.assertEqual(sb.status("GX1.gate.design"), "blocked", "an answer alone does not approve")
+        sb.approve("GX1_design.md")
+        sb.run()
+        self.assertEqual(sb.status("GX1.gate.design"), "done")
+
+    def test_39_switch_off_sends_nothing(self):
+        sb = self.gate(on=False)
+        self.assertEqual(self.tg.sent, [])
+        self.assertEqual(sb.status("GX1.gate.design"), "blocked")
+        self.assertEqual(sb.eng.consent.poll(force=True), 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2 if "-v" in sys.argv else 1, argv=[sys.argv[0]])

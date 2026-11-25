@@ -13,6 +13,7 @@ import glob
 import time
 
 from . import agent, notify
+from .consent import Consent
 from .common import (DEFAULT_STATE, Config, Logger, RUNNER_HOME, Store, fmt_dur, hm, iso, now, read_text,
                      write_json)
 from .plan import Project, load_sequence, msg_id, msg_refs, next_unit, unit_by_id
@@ -40,6 +41,7 @@ class Engine(object):
         self.store = Store(self.cfg.var_dir)
         self.log = Logger(self.cfg.var_dir)
         self.project = Project(self.cfg)
+        self.consent = Consent(self.cfg, self.store, self.log, self.project)
         self.seq = load_sequence(self.cfg)
         self.caffeinate = None
         self.last_tick = now()
@@ -205,6 +207,7 @@ class Engine(object):
 
     # ------------------------------------------------------------------ one step
     def step(self):
+        self.consent.poll()  # owner replies from Telegram (no-op when off or nothing pending)
         st = self.state()
         t = now()
         if st["mode"] == "waiting":
@@ -505,6 +508,7 @@ class Engine(object):
                 self.log("unblocked %s by %s" % (t["id"], msg["name"]))
 
     def refresh_blocked(self):
+        to_send = []
         with self.store.locked():
             data = self.tasks()
             changed = False
@@ -528,6 +532,7 @@ class Engine(object):
                         self.notify("urgent", "Waiting for your approval",
                                     "%s. Approve in the Research chat; the runner resumes when Research writes "
                                     "docs/collab/approvals/%s." % (t["title"], t["gate"]), once_key="gate:" + t["gate"])
+                        to_send.append(dict(t))  # TG-CONSENT: sent after the lock is released
                 elif t["status"] == "blocked":
                     b = t.get("blocked") or {}
                     if t["kind"] == "wait_cards":
@@ -547,6 +552,9 @@ class Engine(object):
                             changed = True
             if changed:
                 self.save_tasks(data)
+        for t in to_send:  # network calls happen outside the store lock
+            if self.consent.enabled():
+                self.consent.send_gate(t)
 
     # ------------------------------------------------------------------ execution
     def execute(self, task):

@@ -72,3 +72,8 @@ Everything is in `config.ini` (models table, turns, session length, grace, escal
 - Remaining subscription allowance is not readable by scripts; `ems usage` shows estimates per run.
 - A MacBook with the lid closed can still sleep; on wake the runner reconciles and continues if the session has time.
 - Intel Mac: Android work is fine; for iOS store releases plan an Apple Silicon or cloud Mac (Inference).
+
+## Telegram consent gate (TG-CONSENT)
+
+Off by default. Set `telegram = yes` under `[consent]` in `config.ini` to turn it on; `no` restores the old behaviour.
+When a task stops at an owner gate, the runner sends a header (options, inline buttons) and the brief in parts of under 4,096 characters to every id in `recipients`. Replies are accepted only from those ids: tap a button, reply with the option number to the header message, or send `/approve G01-design 1`. A valid reply writes one new `Kind: answer` message in `docs/collab/to-research/`; Research then writes the approval file and the runner resumes as it does today. Needs `TELEGRAM_BOT_TOKEN` in `~/.skysoft/secrets.env`. State is in `var/consent.json`.
