@@ -32,7 +32,7 @@ def msg(frm, to, about, kind=None, needs="yes", blocking="no", body="text"):
 
 
 class Sandbox(object):
-    def __init__(self, script, units=None, auto=False):
+    def __init__(self, script, units=None, auto=False, research=False):
         self.dir = tempfile.mkdtemp(prefix="ems_sandbox_")
         self.root = os.path.join(self.dir, "project")
         self.var = os.path.join(self.dir, "var")
@@ -60,8 +60,9 @@ class Sandbox(object):
         local = os.path.join(self.dir, "local.ini")
         open(local, "w").write("[notify]\ndry_run = yes\n[daemon]\nkeep_awake = no\npoll_seconds = 1\n"
                                "[session]\ngrace_minutes = 0\n[limits]\nprobe_host = 127.0.0.1\n"
-                               "[auto]\ndesign = %s\nrelease = %s\nmanual_release_units = GX2\n"
-                               "[notify]\ndigest_time =\n" % (("yes", "yes") if auto else ("no", "no")))
+                               "[auto]\ndesign = %s\nrelease = %s\nresearch = %s\nmanual_release_units = GX2\n"
+                               "[notify]\ndigest_time =\n" % ((("yes", "yes") if auto else ("no", "no")) +
+                                                               ("yes" if research else "no",)))
         os.environ.update({
             "EMS_PROJECT_ROOT": self.root, "EMS_RUNNER_VAR": self.var, "EMS_SEQUENCE_FILE": seq,
             "EMS_RUNNER_LOCAL": local, "EMS_SECRETS_FILE": os.path.join(self.dir, "nosecrets"),
@@ -336,6 +337,48 @@ class RunnerTests(unittest.TestCase):
         sb.run()
         self.assertEqual(sb.status("P901.t01"), "done")
 
+    def test_25_auto_research_answers_and_dev_resumes(self):
+        q = "2026-11-26_015_Q-unclear.md"
+        self.sb = sb = Sandbox({r"P901\.t01": ["blocked:question:%s" % q, "done"],
+                                r"research-2026-11-26_015": ["done"]}, research=True)
+        sb.run()
+        sb.approve("GX1_design.md")
+        sb.run()
+        self.assertEqual(sb.status("P901.t01"), "blocked")
+        open(sb.c("to-research", q), "w").write(msg("Dev", "Research", "P901.t01", blocking="yes"))
+        sb.run()
+        self.assertEqual(sb.status("research-2026-11-26_015"), "done")
+        self.assertEqual([c["model"] for c in sb.calls() if c["task"].startswith("research-")], ["opus"])
+        self.assertEqual(sb.status("P901.t01"), "done", "Development resumes after the automatic answer")
+
+    def test_26_auto_research_parks_owner_items(self):
+        q = "2026-11-26_016_Q-scope.md"
+        self.sb = sb = Sandbox({r"P901\.t01": ["blocked:question:%s" % q, "done"],
+                                r"research-2026-11-26_016": ["blocked:owner:2026-11-26_OQ_research-2026-11-26_016.md"]},
+                               research=True)
+        sb.run()
+        sb.approve("GX1_design.md")
+        sb.run()
+        open(sb.c("to-research", q), "w").write(msg("Dev", "Research", "P901.t01", blocking="yes"))
+        open(sb.c("to-research", "2026-11-26_017_A-fyi.md"), "w").write(msg("SkyUI", "Research", "R1", needs="no"))
+        sb.run()
+        self.assertIsNone(sb.task("research-2026-11-26_017"), "messages that need no action start no run")
+        self.assertEqual(sb.task("research-2026-11-26_016")["blocked"]["reason"], "owner")
+        self.assertEqual(sb.status("P901.t01"), "blocked")
+        open(sb.c("to-dev", "2026-11-26_040_D40-owner-answer.md"), "w").write(
+            msg("Research", "Dev", "D40", "answer", body="Answer to %s (owner chose option 1)." % q))
+        sb.run()
+        self.assertEqual(sb.status("research-2026-11-26_016"), "done")
+        self.assertEqual(sb.status("P901.t01"), "done")
+
+    def test_27_research_off_only_notifies(self):
+        q = "2026-11-26_018_Q-x.md"
+        self.sb = sb = Sandbox({})
+        sb.run()
+        open(sb.c("to-research", q), "w").write(msg("Dev", "Research", "P901.t01", blocking="yes"))
+        sb.run()
+        self.assertIsNone(sb.task("research-2026-11-26_018"))
+
     def test_19_plan_change_without_correction_holds_next_unit(self):
         self.sb = sb = Sandbox({})
         sb.run()
@@ -441,6 +484,18 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(g("Edit", {"file_path": "apps/skyui/skyui/x.css"}, role="skyui"), 0)
         self.assertEqual(g("Edit", {"file_path": "apps/skysoft-ems/x.py"}, role="skyui"), 2)
         self.assertEqual(g("Read", {"file_path": "source_snapshot/education/x.py"}), 2)
+        R = dict(role="research", task="research-2026-11-26_015")
+        self.assertEqual(g("Edit", {"file_path": "docs/research/EMS_Owner_Decisions_Register_Part4.md"}, **R), 0)
+        self.assertEqual(g("Write", {"file_path": "docs/collab/to-dev/new_D90.md"}, **R), 0)
+        self.assertEqual(g("Write", {"file_path": "docs/collab/owner/2026-11-26_OQ_x.md"}, **R), 0)
+        self.assertEqual(g("Edit", {"file_path": "docs/collab/to-dev/old.md"}, **R), 2)
+        self.assertEqual(g("Write", {"file_path": "docs/collab/approvals/G01_design.md"}, **R), 2)
+        self.assertEqual(g("Edit", {"file_path": "apps/skysoft-ems/x.py"}, **R), 2)
+        self.assertEqual(g("Edit", {"file_path": "infra/scripts/backup.sh"}, **R), 2)
+        self.assertEqual(g("Bash", {"command": "git -C docs commit -am x"}, **R), 2)
+        self.assertEqual(g("Bash", {"command": "echo x > infra/scripts/a.sh"}, **R), 2)
+        self.assertEqual(g("Bash", {"command": "echo hi >> docs/research/SYNC_TO_PROJECT.md"}, **R), 0)
+        self.assertEqual(g("Bash", {"command": "grep -n x docs/p000_apply_1.txt | head"}, **R), 0)
         os.makedirs(os.path.join(root, "docs", "collab", "approvals"))
         open(os.path.join(root, "docs", "collab", "approvals", "G01_release.md"), "w").write("x")
         self.assertEqual(B("git push origin main --tags", task="G01.merge"), 0)

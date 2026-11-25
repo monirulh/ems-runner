@@ -45,6 +45,14 @@ def main():
             return 0
         if "/docs/collab/approvals/" in low:
             deny("approval files are written only by Research on the owner's word (OP-Q1)")
+        if role == "research":
+            if re.search(r"/docs/collab/to-[a-z-]+/", low) and os.path.exists(path):
+                deny("collab messages are never edited; write a new message file instead (DM-3)")
+            if ("/docs/research/" in low or re.search(r"/docs/collab/(to-dev|to-skyui|owner)/", low)
+                    or low.endswith("/docs/collab/.last_read_research") or low.endswith("/docs/CONFLICTS.md")):
+                return 0
+            deny("Research writes only docs/research, new messages to Development/SkyUI, owner questions, "
+                 ".last_read_research and CONFLICTS.md; it never writes code (AUTO-Q11)")
         if "/docs/research/" in low:
             deny("docs/research is owned by Research")
         if re.search(r"/docs/collab/to-[a-z-]+/", low) and os.path.exists(path):
@@ -106,7 +114,11 @@ def main():
             if m and re.search(path_re, m.group(2).split()[-1] if m.group(2).split() else ""):
                 return True
         return False
-    if writes_to(r"docs/research/"):
+    if role == "research" and re.search(r"\bgit\b[^|;&]*\b(commit|add|push|merge|rebase|reset|checkout|switch|tag|stash|rm|mv)\b", c):
+        deny("Research does not change git state; Development commits docs")
+    if role == "research" and (writes_to(r"(apps|infra|tools|qa)/") or writes_to(r"\.(py|js|ts|sh|json|css|html|dart)\b")):
+        deny("Research never writes code (AUTO-Q11)")
+    if role != "research" and writes_to(r"docs/research/"):
         deny("docs/research is owned by Research")
     if re.search(r"\bgit\s+(push|merge)\b", c):
         if not task.endswith(".merge"):

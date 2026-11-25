@@ -60,6 +60,11 @@ def main():
             p = os.path.join(root, "docs", "reviews", unit + ".md")
             os.makedirs(os.path.dirname(p), exist_ok=True)
             open(p, "a").write("review\n")
+        if task.startswith("research-"):
+            qid = task[len("research-"):]
+            p = os.path.join(root, "docs", "collab", "to-dev", "%s_900_D90-auto-answer.md" % qid[:10])
+            open(p, "w").write("# D90\nFrom: Research      To: Dev      Date: x\nAbout: answer\n"
+                               "Needs action: yes            Blocking: no\nKind: answer\n\nAnswer to %s.\n" % qid)
         if task.endswith(".handover"):
             open(os.path.join(root, "docs", "HANDOVER.md"), "w").write("handover %s\n" % task)
         if task.endswith(".plan"):

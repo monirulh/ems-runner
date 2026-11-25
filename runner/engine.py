@@ -18,7 +18,7 @@ from .common import (DEFAULT_STATE, Config, Logger, RUNNER_HOME, Store, fmt_dur,
 from .plan import Project, load_sequence, msg_id, msg_refs, next_unit, unit_by_id
 
 MODEL_KINDS = ("group_design", "design_check", "phase_plan", "build", "test", "apply", "qa", "docs", "po", "handover",
-               "review", "fix", "merge", "inbox", "skyui")
+               "review", "fix", "merge", "inbox", "skyui", "research")
 PLAN_TASK_KINDS = ("build", "test", "apply", "qa", "docs")
 NO_MODEL = ("gate", "wait_cards", "phase_end", "unit_end")
 ESCALATE_TO = "opus"
@@ -425,9 +425,18 @@ class Engine(object):
                 if frm.startswith("dev") and m["head"].get("needs action", "yes").lower().startswith("y"):
                     data["tasks"].append(self._task("skyui-%s" % msg_id(name), "skyui", data.get("unit"), priority=5,
                                                     request=name, title="SkyUI request %s" % name))
+            auto_research = self.cfg.getbool("auto", "research", False)
             for name in new["to-research"]:
                 m = self.project.read_message("to-research", name)
                 blocking = m["head"].get("blocking", "").lower().startswith("y")
+                frm = m["head"].get("from", "").lower()
+                needs = m["head"].get("needs action", "yes").lower().startswith("y")
+                if auto_research and needs and not frm.startswith("research") and not frm.startswith("owner"):
+                    # AUTO-Q11: an unattended Research run answers; only real owner decisions wait for the owner
+                    data["tasks"].append(self._task("research-%s" % msg_id(name), "research", data.get("unit"),
+                                                    priority=20, request=name, title="Research answers %s" % name))
+                    self.notify("info", "Research answering automatically", "%s (from %s)" % (name, frm or "?"))
+                    continue
                 self.notify("urgent" if blocking else "info", "Message for Research",
                             "%s (from %s)%s" % (name, m["head"].get("from", "?"),
                                                 " — blocking; say 'next' in the Research chat" if blocking else ""))
@@ -450,6 +459,15 @@ class Engine(object):
     def _unblock_by_refs(self, data, msg):
         refs = msg_refs(msg)
         for t in data["tasks"]:
+            if t["kind"] == "research" and t["status"] == "blocked":
+                req = t.get("request", "")
+                if msg_id(req) in refs or req in msg["text"]:
+                    # the owner's answer reached Development through the Research chat: the research task is closed
+                    t["status"] = "done"
+                    t["blocked"] = None
+                    t.setdefault("notes", []).append("Answered by %s" % msg["name"])
+                    self.log("closed %s by %s" % (t["id"], msg["name"]))
+                continue
             b = t.get("blocked") or {}
             if t["status"] != "blocked" or b.get("reason") not in ("question", "skyui", "research"):
                 continue
@@ -515,7 +533,7 @@ class Engine(object):
             return
         model = task.get("model") or self.cfg.model_for(task["kind"])
         prompt, system_file, cwd, role = self.build_prompt(task, model)
-        settings = self.guard_settings()
+        settings = self.guard_settings(role)
         st = self.state()
         grace = self.cfg.getint("session", "grace_minutes", 15) * 60
         deadline = min(now() + self.cfg.getint("session", "max_task_minutes", 120) * 60,
@@ -548,7 +566,7 @@ class Engine(object):
     def build_prompt(self, task, model):
         kind = task["kind"]
         unit = unit_by_id(self.seq, task["unit"]) if task.get("unit") else None
-        role = "skyui" if kind == "skyui" else "dev"
+        role = {"skyui": "skyui", "research": "research"}.get(kind, "dev")
         cwd = self.project.p(self.cfg.get("paths", "skyui_dir", "apps/skyui")) if role == "skyui" else self.project.root
         tpl = read_text(os.path.join(RUNNER_HOME, "prompts", "%s.md" % kind))
         notes = "\n".join("- " + n for n in task.get("notes", [])[-6:]) or "- none"
@@ -571,7 +589,7 @@ class Engine(object):
             design_prompt=(unit or {}).get("design_prompt", ""),
             messages="\n".join("- docs/collab/to-dev/%s" % m for m in task.get("messages", [])) or "- none",
             deferred="\n".join("- %s" % m for m in task.get("deferred", [])) or "- none",
-            request="docs/collab/to-skyui/%s" % task.get("request", ""),
+            request=("docs/collab/to-research/%s" if kind == "research" else "docs/collab/to-skyui/%s") % task.get("request", ""),
             items="\n".join("- " + i for i in task.get("items", [])) or "- see the review file",
             round=task.get("round", 1), model=model, project_root=self.project.root,
             verify="\n".join("- `%s`" % v for v in task.get("verify", [])) or "- (none given)",
@@ -584,13 +602,16 @@ class Engine(object):
             f.write(sys_tpl.format_map(fields))
         return prompt, sys_path, cwd, role
 
-    def guard_settings(self):
+    def guard_settings(self, role="dev"):
         if not self.cfg.getbool("agent", "use_guard", True):
             return None
-        path = os.path.join(self.cfg.var_dir, "guard_settings.json")
+        deny = self.cfg.getlist("guard", "deny_rules")
+        if role == "research":
+            deny = [d for d in deny if "docs/research" not in d]
+        path = os.path.join(self.cfg.var_dir, "guard_settings%s.json" % ("" if role == "dev" else "_" + role))
         hook = os.path.join(RUNNER_HOME, "guard", "pretool_guard.py")
         settings = {
-            "permissions": {"deny": self.cfg.getlist("guard", "deny_rules")},
+            "permissions": {"deny": deny},
             "hooks": {"PreToolUse": [{"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read",
                                       "hooks": [{"type": "command", "command": "python3 %s" % hook}]}]},
         }
@@ -955,7 +976,8 @@ class Engine(object):
         self.log("blocked %s: %s (%s)" % (tid, reason, waiting), kind="blocked", task=tid, reason=reason)
         what = {"approval": "Needs your approval", "question": "Waiting for Research", "skyui": "Waiting for SkyUI",
                 "owner-action": "Owner action needed", "toolchain": "Toolchain missing",
-                "research": "Research must decide", "service": "Service errors"}.get(reason, "Blocked")
+                "research": "Research must decide", "service": "Service errors",
+                "owner": "Your decision needed"}.get(reason, "Blocked")
         level = "info" if reason == "skyui" else "urgent"
         self.notify(level, "%s: %s" % (what, tid), "%s%s" % (res.get("summary", ""),
                                                              (" — waiting for %s" % waiting) if waiting else ""))
