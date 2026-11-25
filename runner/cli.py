@@ -12,25 +12,11 @@ import time
 
 from .common import RUNNER_HOME, Config, expand, fmt_dur, hm, iso, load_secrets, now, parse_duration, parse_until
 from .engine import MODEL_KINDS, Engine
-from . import notify
+from . import actions, notify
+from .actions import daemon_alive
 
 LABEL = "com.skysoft.ems-runner"
 PLIST = expand("~/Library/LaunchAgents/%s.plist" % LABEL)
-
-
-def daemon_alive(eng):
-    pidfile = eng.store.path("daemon.pid")
-    hb = eng.store.path("heartbeat")
-    try:
-        pid = int(open(pidfile).read().strip())
-        os.kill(pid, 0)
-    except (OSError, ValueError):
-        return None
-    try:
-        age = now() - float(open(hb).read().strip())
-    except (OSError, ValueError):
-        age = None
-    return pid, age
 
 
 def ensure_daemon(eng):
@@ -53,91 +39,40 @@ def cmd_init(eng, a):
           % ((st["baseline"] or {}).get("master_sha", "?")[:12], sum(len(v) for v in st["seen"].values())))
 
 
+def _report(res):
+    ok, text = res
+    print(text)
+    return 0 if ok else 1
+
+
 def cmd_start(eng, a):
-    if not eng.state().get("baseline"):
-        print("Run `ems init` first.")
-        return 1
-    seconds = parse_duration(a.duration) if a.duration else None
-    until = parse_until(a.until) if a.until else None
-    st = eng.start_session(seconds=seconds, until=until)
-    print("Session started: works until %s (%s)." % (hm(st["session"]["end"]), fmt_dur(st["session"]["end"] - now())))
-    ensure_daemon(eng)
+    rc = _report(actions.start(eng, a.duration, a.until))
+    if not rc:
+        ensure_daemon(eng)
+    return rc
 
 
 def cmd_set_duration(eng, a):
-    st = eng.state()
-    if not st.get("session"):
-        print("No session is running; use `ems start --for %s`." % a.duration)
-        return 1
-    end = parse_until(a.duration) if ":" in a.duration else st["session"]["start"] + parse_duration(a.duration)
-    st["session"]["end"] = end
-    eng.update_state(session=st["session"])
-    eng.log("session end changed to %s" % iso(end))
-    print("Session now ends at %s." % hm(end))
+    return _report(actions.set_duration(eng, a.duration))
 
 
 def cmd_pause(eng, a):
-    st = eng.state()
-    if a.now and st.get("current"):
-        eng.update_state(interrupt="pause")
-        print("Interrupting %s; it will be checkpointed and the runner paused." % st["current"]["task"])
-    else:
-        eng.update_state(mode="paused", pause_reason="owner")
-        print("Paused%s." % (" after the current task" if st.get("current") else ""))
+    return _report(actions.pause(eng, a.now))
 
 
 def cmd_resume(eng, a):
-    st = eng.state()
-    if not st.get("session") or now() >= st["session"]["end"]:
-        print("The session has ended. Start a new one with `ems start` (default %sh)." %
-              eng.cfg.get("session", "default_hours", "5"))
-        return 1
-    eng.update_state(mode="running", pause_reason=None, wait=None)
-    eng.log("resumed by owner")
-    print("Resumed; session ends %s." % hm(st["session"]["end"]))
-    ensure_daemon(eng)
+    rc = _report(actions.resume(eng))
+    if not rc:
+        ensure_daemon(eng)
+    return rc
 
 
 def cmd_stop(eng, a):
-    st = eng.state()
-    if st.get("current"):
-        eng.update_state(interrupt="stop")
-        print("Stopping: %s will be interrupted and checkpointed, then the runner sleeps." % st["current"]["task"])
-    else:
-        eng.end_session("stopped by owner")
-        print("Session stopped; the runner is asleep.")
+    return _report(actions.stop(eng))
 
 
 def cmd_status(eng, a):
-    st = eng.state()
-    data = eng.tasks()
-    alive = daemon_alive(eng)
-    print("Mode:        %s%s" % (st["mode"], (" (%s)" % st["pause_reason"]) if st.get("pause_reason") else ""))
-    print("Daemon:      %s" % ("running, pid %d, heartbeat %ss ago" % (alive[0], int(alive[1] or 0)) if alive else "NOT running"))
-    if st.get("session"):
-        print("Session:     until %s (%s left)" % (hm(st["session"]["end"]), fmt_dur(st["session"]["end"] - now())))
-    if st.get("wait"):
-        w = st["wait"]
-        print("Waiting:     %s until %s — %s" % (w["reason"], hm(w["until"]), w.get("detail", "")))
-    blocks = {m: u for m, u in (st.get("model_blocks") or {}).items() if u > now()}
-    if blocks:
-        print("Model limit: %s" % ", ".join("%s until %s" % (m, hm(u)) for m, u in blocks.items()))
-    cur = st.get("current")
-    if cur:
-        print("Current:     %s on %s, running %s" % (cur["task"], cur["model"], fmt_dur(now() - cur["started"])))
-    print("Unit:        %s (done: %s)" % (data.get("unit"), ", ".join(data.get("units_done", [])) or "none"))
-    counts = {}
-    for t in data["tasks"]:
-        counts[t["status"]] = counts.get(t["status"], 0) + 1
-    print("Tasks:       %s" % (", ".join("%s %d" % kv for kv in sorted(counts.items())) or "none yet"))
-    print("Next:        %s" % (st.get("next_action") or "-"))
-    cp = st.get("last_checkpoint")
-    if cp:
-        print("Checkpoint:  %s — %s %s" % (iso(cp["at"]), cp["why"], ", ".join(cp.get("commits", []))))
-    blocked = [t for t in data["tasks"] if t["status"] == "blocked"]
-    for t in blocked:
-        b = t.get("blocked") or {}
-        print("Blocked:     %s — %s %s %s" % (t["id"], b.get("reason"), b.get("waiting_for") or "", (b.get("note") or "")[:80]))
+    print(actions.status_text(eng))
 
 
 def cmd_tasks(eng, a):
@@ -379,31 +314,11 @@ def cmd_open(eng, a):
 
 
 def cmd_review(eng, a):
-    from .review import build
-    from .plan import unit_by_id
-    import glob as _g
-    import re as _re
-    target = a.unit.strip()
-    if target.lower() in ("last", "latest"):
-        runs = [d for d in _g.glob(os.path.join(eng.cfg.project_root, "qa", "out", "P[0-9][0-9][0-9]_*")) if os.path.isdir(d)]
-        if not runs:
-            print("no QA run yet")
-            return 1
-        phase = os.path.basename(max(runs, key=os.path.getmtime))[:4]
-        phases, label = [phase], phase
-    elif _re.fullmatch(r"[Pp]\d{3}(\.\w+)?", target):
-        phase = target[:4].upper()
-        phases, label = [phase], phase
-    else:
-        u = unit_by_id(eng.seq, target)
-        if not u:
-            print("unknown group or phase %s (use e.g. G01, P003 or last)" % target)
-            return 1
-        phases, label = u["phases"], target
-    out = build(eng.cfg.project_root, phases, label)
-    print("review page: %s" % out)
-    if not a.no_open:
-        subprocess.run(["open", out], check=False)
+    ok, text, info = actions.review(eng, a.unit)
+    print(text)
+    if ok and not a.no_open:
+        subprocess.run(["open", info["path"]], check=False)
+    return 0 if ok else 1
 
 
 def main(argv=None):

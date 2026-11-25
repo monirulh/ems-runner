@@ -77,3 +77,15 @@ Everything is in `config.ini` (models table, turns, session length, grace, escal
 
 Off by default. Set `telegram = yes` under `[consent]` in `config.ini` to turn it on; `no` restores the old behaviour.
 When a task stops at an owner gate, the runner sends a header (options, inline buttons) and the brief in parts of under 4,096 characters to every id in `recipients`. Replies are accepted only from those ids: tap a button, reply with the option number to the header message, or send `/approve G01-design 1`. A valid reply writes one new `Kind: answer` message in `docs/collab/to-research/`; Research then writes the approval file and the runner resumes as it does today. Needs `TELEGRAM_BOT_TOKEN` in `~/.skysoft/secrets.env`. State is in `var/consent.json`.
+
+## Telegram control menu (TG-CONTROL)
+
+Set `telegram = yes` under `[control]` in `config.ini` (`no` = menu ignored; the consent gate is unaffected). Send `ems` or `/ems` to the bot in a private chat: one menu message appears and every tap edits it in place. Items: On/Off (start with a duration, stop), Pause/Resume (after this task, now), Status, Duration, Review & screenshots. Only actions valid for the current state are shown; anything that changes the runner needs a Confirm screen (✅ Run / ⬅ Back); every level has Back. Typed shortcuts open the Confirm screen: `/ems pause [now]`, `/ems resume`, `/ems stop`, `/ems start [2h]`, `/ems duration 2h`; `/ems status` shows the status.
+
+- Same listener as the consent gate (callback prefixes `c:` consent, `m:` menu); it runs in the daemon, also while a task is running. State: `var/consent.json` (update offset), `var/telegram_control.json` (open menus, nonces).
+- Buttons are single-use and expire 10 minutes after the menu was last drawn; before ✅ Run the state is re-read and, if it changed, the menu is redrawn instead.
+- Duration presets and the default are in `[control] presets` / `default_preset`. "Custom…" takes one reply: `2h30m`, `90m` or `06:30` (1 minute to 24 hours).
+- Both ids in `[consent] recipients` may use everything; other senders and group chats are ignored. When one id changes the runner, the other gets a one-line notice. At most 5 changing actions per minute. Every action is logged to `var/telegram_control.log` (time, user id, action, result).
+- Review sends the problems as text, the page as a file and key screens (Bangla light) as an album. Screenshots (group → phase → set) come from the latest `qa/out/P0NN_<ts>/screenshots/`: albums of 10, at most 30 pictures per request (then a note to use `ems open screens`), files over 10 MB skipped. No live screen capture.
+- The `ems` commands and the menu call the same functions in `runner/actions.py`.
+- Rollback: `[control] telegram = no`, restart the daemon.

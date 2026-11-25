@@ -14,6 +14,7 @@ import time
 
 from . import agent, notify
 from .consent import Consent
+from .control import Control
 from .common import (DEFAULT_STATE, Config, Logger, RUNNER_HOME, Store, fmt_dur, hm, iso, now, read_text,
                      write_json)
 from .plan import Project, load_sequence, msg_id, msg_refs, next_unit, unit_by_id
@@ -42,6 +43,8 @@ class Engine(object):
         self.log = Logger(self.cfg.var_dir)
         self.project = Project(self.cfg)
         self.consent = Consent(self.cfg, self.store, self.log, self.project)
+        self.control = Control(self)
+        self.consent.control = self.control  # one Telegram listener serves both
         self.seq = load_sequence(self.cfg)
         self.caffeinate = None
         self.last_tick = now()
@@ -581,6 +584,7 @@ class Engine(object):
         self.log("start %s (%s) on %s" % (task["id"], task["kind"], model), kind="task_start", task=task["id"], model=model)
 
         def should_interrupt():
+            self.consent.poll()  # Telegram stays answerable while a task runs (throttled; may set an interrupt)
             s = self.state()
             if s.get("interrupt"):
                 return s["interrupt"]

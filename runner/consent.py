@@ -6,6 +6,7 @@ import os
 import re
 import urllib.parse
 import urllib.request
+import uuid
 
 from .common import iso, load_secrets, now, read_text
 
@@ -53,12 +54,30 @@ class Telegram(object):
         raw = urllib.request.urlopen("https://api.telegram.org/bot%s/%s" % (self.token, method), data=data, timeout=40).read()
         return json.loads(raw)
 
+    def upload(self, method, params, files):
+        """multipart POST; files = {field name: local path}."""
+        boundary = "----ems" + uuid.uuid4().hex
+        body = b""
+        for k, v in params.items():
+            body += ('--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\n%s\r\n' % (boundary, k, v)).encode()
+        for k, path in files.items():
+            fname = os.path.basename(path).replace('"', "")
+            body += ('--%s\r\nContent-Disposition: form-data; name="%s"; filename="%s"\r\n'
+                     "Content-Type: application/octet-stream\r\n\r\n" % (boundary, k, fname)).encode()
+            with open(path, "rb") as f:
+                body += f.read() + b"\r\n"
+        body += ("--%s--\r\n" % boundary).encode()
+        req = urllib.request.Request("https://api.telegram.org/bot%s/%s" % (self.token, method), data=body,
+                                     headers={"Content-Type": "multipart/form-data; boundary=%s" % boundary})
+        return json.loads(urllib.request.urlopen(req, timeout=120).read())
+
 
 class Consent(object):
     def __init__(self, cfg, store, log, project, client=None):
         self.cfg, self.store, self.log, self.project = cfg, store, log, project
         self._client = client
         self._last_poll = 0
+        self.control = None  # the Telegram control menu shares this listener (set by the engine)
 
     # ---------------------------------------------------------------- settings
     def enabled(self):
@@ -137,30 +156,37 @@ class Consent(object):
 
     # ---------------------------------------------------------------- replies
     def poll(self, force=False):
-        """Fetch updates and handle replies. Throttled; never raises."""
-        if not self.enabled():
+        """One listener for the consent gate and the control menu (Telegram allows one poller). Throttled; never raises."""
+        ctl = self.control if (self.control and self.control.enabled()) else None
+        if not self.enabled() and not ctl:
             return 0
         interval = self.cfg.getint("consent", "poll_seconds", 5)
         if not force and now() - self._last_poll < interval:
             return 0
         self._last_poll = now()
         st = self.state()
-        if not any(g["answered"] is None for g in st["gates"].values()):
+        pending = self.enabled() and any(g["answered"] is None for g in st["gates"].values())
+        if not pending and not ctl:
             return 0  # nothing pending: no need to call Telegram
         try:
             tg = self.client()
             if not tg:
                 return 0
+            if ctl:
+                ctl.setup(tg)
             r = tg.call("getUpdates", {"offset": st["offset"], "timeout": 0,
                                        "allowed_updates": json.dumps(["message", "callback_query"])})
             handled = 0
             for upd in r.get("result", []):
-                self.handle(upd, tg)
-                handled += 1
-                with self.store.locked():
+                with self.store.locked():  # mark first: an update is never processed twice
                     s = self.state()
                     s["offset"] = max(s["offset"], upd["update_id"] + 1)
                     self.store.save("consent.json", s)
+                if ctl and ctl.claims(upd):
+                    ctl.handle(upd)
+                elif self.enabled():
+                    self.handle(upd, tg)
+                handled += 1
             return handled
         except Exception as e:  # noqa: BLE001
             self.log("consent: poll failed: %s" % type(e).__name__)

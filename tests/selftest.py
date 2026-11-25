@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNNER_HOME = os.path.dirname(HERE)
@@ -691,6 +692,445 @@ class ConsentTests(unittest.TestCase):
         self.assertEqual(self.tg.sent, [])
         self.assertEqual(sb.status("GX1.gate.design"), "blocked")
         self.assertEqual(sb.eng.consent.poll(force=True), 0)
+
+
+
+class FakeTG(FakeTelegram):
+    """Fake Telegram that also records edits, uploads and every call."""
+
+    def __init__(self):
+        FakeTelegram.__init__(self)
+        self.calls, self.edits, self.uploads, self.fail_media = [], [], [], False
+
+    def call(self, method, params):
+        if method == "editMessageText":
+            self.calls.append((method, params))
+            self.edits.append(params)
+            return {"result": {}}
+        r = FakeTelegram.call(self, method, params)
+        self.calls.append((method, self.sent[-1] if method == "sendMessage" else params))
+        return r
+
+    def upload(self, method, params, files):
+        if self.fail_media and method == "sendMediaGroup":
+            raise OSError("boom")
+        self.uploads.append((method, params, files))
+        return {"result": True}
+
+
+def png(path, size=10):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"x" * size)
+
+
+class ControlTests(unittest.TestCase):
+    uid = 0
+
+    def setUp(self):
+        self.sb = sb = Sandbox({})
+        self.tg = FakeTG()
+        self.ctl = sb.eng.control
+        self.ctl._client = self.tg
+        sb.eng.consent._client = self.tg
+        self.ctl.enabled = lambda: True
+        sb.eng.consent.ids = lambda: [A, B]
+
+    def tearDown(self):
+        self.sb.close()
+
+    # -- helpers
+    def push(self, upd):
+        ControlTests.uid += 1
+        upd["update_id"] = ControlTests.uid
+        self.tg.updates.append(upd)
+        self.sb.eng.consent.poll(force=True)
+
+    def say(self, who, text, chat="private", date=None):
+        m = {"from": {"id": int(who)}, "text": text, "message_id": 5, "chat": {"id": int(who), "type": chat}}
+        if date:
+            m["date"] = date
+        self.push({"message": m})
+
+    def mid(self):
+        return [m for m in self.tg.sent if "reply_markup" in m][-1]["message_id"]
+
+    def kb(self, mid):
+        for method, p in reversed(self.tg.calls):
+            if method in ("sendMessage", "editMessageText") and p.get("message_id") == mid and "reply_markup" in p:
+                return [b for row in json.loads(p["reply_markup"])["inline_keyboard"] for b in row]
+        return []
+
+    def labels(self, mid):
+        return [b["text"] for b in self.kb(mid)]
+
+    def tap_data(self, who, mid, data):
+        self.push({"callback_query": {"id": "q", "from": {"id": int(who)}, "data": data,
+                                      "message": {"message_id": mid, "chat": {"id": int(who), "type": "private"}}}})
+
+    def tap(self, who, mid, label):
+        b = next(b for b in self.kb(mid) if b["text"].startswith(label))
+        self.tap_data(who, mid, b["callback_data"])
+
+    def text_of(self, mid):
+        for method, p in reversed(self.tg.calls):
+            if method in ("sendMessage", "editMessageText") and p.get("message_id") == mid:
+                return p["text"]
+
+    def off(self):
+        self.sb.eng.update_state(mode="asleep", session=None)
+
+    def recorder(self, name, result=(True, "ok")):
+        from unittest import mock
+        from runner import actions
+        patcher = mock.patch.object(actions, name, side_effect=lambda *a, **k: result)
+        rec = patcher.start()
+        self.addCleanup(patcher.stop)
+        return rec
+
+    # -- tree
+    def walk(self, ctl, path="home", seen=None, depth=0):
+        seen = seen if seen is not None else {}
+        text, rws = ctl.screen(path)
+        seen[path] = rws
+        for row in rws:
+            for label, action, arg in row:
+                self.assertLessEqual(len(("m:%s:%s:abcdef" % (action, arg)).encode()), 64)
+                if action == "go" and arg not in seen and depth < 8:
+                    self.walk(ctl, arg, seen, depth + 1)
+        return seen
+
+    def make_runs(self):
+        for ph in ("P901", "P902"):
+            for step, lang, theme in (("001", "bn", "light"), ("002", "bn", "light"), ("002", "en", "dark"),
+                                     ("002", "ar", "light"), ("002", "bn", "dark"), ("002", "en", "light"), ("002", "ar", "dark")):
+                png(os.path.join(self.sb.root, "qa", "out", ph + "_20261126_0100", "screenshots",
+                                 "%s_S%s_home_open_%s_%s.png" % (ph, step, lang, theme)))
+
+    def test_40_every_level_has_back_and_changes_need_confirm(self):
+        self.make_runs()
+        for setup in ("running", "off", "paused"):
+            if setup == "off":
+                self.off()
+            elif setup == "paused":
+                self.sb.eng.start_session(seconds=3600)
+                self.sb.eng.update_state(mode="paused")
+            seen = self.walk(self.ctl)
+            self.assertGreater(len(seen), 5)
+            for path, rws in seen.items():
+                labels = [b[0] for row in rws for b in row]
+                if path != "home":
+                    self.assertTrue(any(l.startswith("⬅") for l in labels), "%s (%s) has no Back" % (path, setup))
+                for row in rws:
+                    for label, action, arg in row:
+                        if action == "run":  # a Run button lives only on a screen that also offers Back
+                            self.assertTrue(any(l.startswith("⬅") for l in labels))
+                if path.split(".")[-1] in ("stop", "task", "now", "resume") or path in ("onoff.start.m300", "dur.m120"):
+                    self.assertIn("✅ Run", labels, path)
+            self.assertFalse(any(a == "run" for row in seen["home"] for _, a, _ in row))
+
+    def test_41_status_runs_at_once_and_changes_nothing(self):
+        self.say(A, "ems")
+        mid = self.mid()
+        before = self.sb.eng.state()["mode"]
+        self.tap(A, mid, "📊")
+        self.assertIn("Mode:", self.text_of(mid))
+        self.assertIn("🔄 Refresh", self.labels(mid))
+        self.assertEqual(self.sb.eng.state()["mode"], before)
+        self.assertIn("EMS · running", self.text_of(mid))
+
+    def test_42_buttons_match_state(self):
+        c = self.ctl
+        flat = lambda path: [l for row in c.screen(path)[1] for l, _, _ in row]  # noqa: E731
+        self.assertIn("⏱ Duration", flat("home"))
+        self.assertEqual(flat("pr")[:2], ["Pause after this task", "Pause now"])
+        self.assertNotIn("Resume", flat("pr"))
+        self.sb.eng.update_state(mode="paused")
+        self.assertEqual(flat("pr")[0], "Resume")
+        self.assertNotIn("Pause now", flat("pr"))
+        self.off()
+        self.assertNotIn("⏱ Duration", flat("home"))
+        self.assertNotIn("⏯ Pause / Resume", flat("home"))
+        self.assertIn("Start session", flat("onoff"))
+        self.assertIn("not available", c.screen("dur")[0])
+        self.assertIn("EMS · off", c.state_line())
+
+    def test_43_each_changing_action_calls_shared_function_once(self):
+        patcher = unittest.mock.patch("runner.control.MAX_CHANGES_PER_MIN", 99)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        start, stop = self.recorder("start"), self.recorder("stop")
+        pause, resume, setd = self.recorder("pause"), self.recorder("resume"), self.recorder("set_duration")
+
+        def flow(who, labels):
+            self.say(who, "ems")
+            mid = self.mid()
+            for l in labels:
+                self.tap(who, mid, l)
+        flow(A, ["⏯", "Pause now", "✅"])
+        pause.assert_called_once_with(self.sb.eng, True)
+        pause.reset_mock()
+        flow(A, ["⏯", "Pause after", "✅"])
+        pause.assert_called_once_with(self.sb.eng, False)
+        flow(A, ["⏱", "2 h", "✅"])
+        setd.assert_called_once_with(self.sb.eng, "120m", from_now=True)
+        flow(A, ["⏻", "Stop", "✅"])
+        stop.assert_called_once_with(self.sb.eng)
+        self.sb.eng.update_state(mode="paused")
+        flow(B, ["⏯", "Resume", "✅"])
+        resume.assert_called_once_with(self.sb.eng)
+        self.off()
+        flow(A, ["⏻", "Start", "5 h", "✅"])
+        start.assert_called_once_with(self.sb.eng, duration="300m", until=None)
+        start.reset_mock()
+        self.off()
+        flow(A, ["⏻", "Start", "Until 08:00", "✅"])
+        start.assert_called_once_with(self.sb.eng, duration=None, until="08:00")
+
+    def test_44_cli_still_works(self):
+        from runner import cli
+        import io
+        import contextlib
+        def run(*args):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.main(list(args))
+            return rc, buf.getvalue()
+        rc, out = run("pause")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.sb.eng.state()["mode"], "paused")
+        self.assertIn("Paused", out)
+        rc, out = run("status")
+        self.assertIn("Mode:        paused", out)
+        with unittest.mock.patch.object(cli, "ensure_daemon"):
+            rc, out = run("resume")
+        self.assertEqual((rc, self.sb.eng.state()["mode"]), (0, "running"))
+        rc, out = run("set-duration", "07:30")
+        self.assertIn("Session now ends", out)
+        rc, out = run("set-duration", "nonsense")
+        self.assertEqual(rc, 1)
+        self.off()
+        rc, out = run("set-duration", "2h")
+        self.assertEqual(rc, 1)
+
+    def test_45_nonce_reuse_and_expiry_refused(self):
+        pause = self.recorder("pause")
+        self.say(A, "/ems pause")
+        mid = self.mid()
+        run = next(b for b in self.kb(mid) if b["text"].startswith("✅"))
+        self.tap_data(A, mid, run["callback_data"])
+        self.tap_data(A, mid, run["callback_data"])  # same nonce again
+        self.assertEqual(pause.call_count, 1)
+        # a stale menu: older than 10 minutes
+        self.say(A, "/ems pause")
+        mid2 = self.mid()
+        run2 = next(b for b in self.kb(mid2) if b["text"].startswith("✅"))
+        real = time.time()
+        with unittest.mock.patch("runner.control.now", lambda: real + 601):
+            self.tap_data(A, mid2, run2["callback_data"])
+        self.assertEqual(pause.call_count, 1)
+        # a forged nonce or changed action
+        self.say(A, "/ems pause")
+        mid3 = self.mid()
+        self.tap_data(A, mid3, "m:run:pr.task:ffffff")
+        self.tap_data(A, mid3, run2["callback_data"])
+        self.assertEqual(pause.call_count, 1)
+        log = open(os.path.join(self.sb.var, "telegram_control.log")).read()
+        self.assertIn("refused", log)
+
+    def test_46_state_change_redraws_instead_of_running(self):
+        pause = self.recorder("pause")
+        self.say(A, "/ems pause")
+        mid = self.mid()
+        self.sb.eng.update_state(mode="paused")  # the other person paused meanwhile
+        self.tap(A, mid, "✅")
+        pause.assert_not_called()
+        self.assertIn("state changed", self.text_of(mid))
+        self.assertIn("EMS · paused", self.text_of(mid))
+
+    def test_47_unknown_sender_and_group_chat_ignored(self):
+        self.say(STRANGER, "ems")
+        self.say(A, "ems", chat="group")
+        self.say(A, "ems", chat="supergroup")
+        self.assertEqual(self.tg.sent, [])
+        self.say(A, "ems")
+        mid = self.mid()
+        pause = self.recorder("pause")
+        self.push({"callback_query": {"id": "q", "from": {"id": int(STRANGER)}, "data": self.kb(mid)[0]["callback_data"],
+                                      "message": {"message_id": mid, "chat": {"id": int(A), "type": "private"}}}})
+        self.assertEqual(self.tg.edits, [])
+        log = open(os.path.join(self.sb.var, "telegram_control.log")).read()
+        self.assertIn("sender not on the list", log)
+        self.assertIn("not a private chat", log)
+        self.assertNotIn("TOKEN", log)
+
+    def test_48_custom_duration(self):
+        from runner.control import parse_custom
+        for ok, spec in (("2h30m", "m150"), ("90m", "m90"), ("5h", "m300"), ("24h", "m1440"), ("06:30", "u0630"), ("23:59", "u2359"),
+                         ("1h99m", "m159"), ("2H30M", "m150")):
+            self.assertEqual(parse_custom(ok), spec, ok)
+        for bad in ("5", "25h", "0m", "0h0m", "24:00", "6:30", "1000m", "2h 30m", "1.5h", "-1h", "now", "", "2h30", "h", "30m\nrm", "06:60"):
+            self.assertIsNone(parse_custom(bad), bad)
+        start = self.recorder("start")
+        self.off()
+        self.say(A, "ems")
+        mid = self.mid()
+        for l in ("⏻", "Start", "Custom"):
+            self.tap(A, mid, l)
+        self.assertIn("one reply", self.text_of(mid))
+        n = len(self.tg.sent)
+        self.say(A, "banana")
+        self.assertIn("Not accepted", self.tg.sent[-1]["text"])
+        self.say(A, "25h")
+        self.assertEqual(len(self.tg.sent), n + 2)
+        self.say(A, "2h30m")
+        self.assertIn("Start a session until", self.text_of(mid))
+        self.tap(A, mid, "✅")
+        start.assert_called_once_with(self.sb.eng, duration="150m", until=None)
+
+    def test_49_presets_come_from_config(self):
+        cfg = self.sb.eng.cfg
+        cfg.cp.set("control", "presets", "30m, 4h, 06:00")
+        cfg.cp.set("control", "default_preset", "4h")
+        self.off()
+        text, rws = self.ctl.screen("onoff.start")
+        labels = [l for row in rws for l, _, _ in row]
+        self.assertEqual(labels[:4], ["4 h (default)", "30 min", "Until 06:00", "Custom…"])
+        cfg.cp.set("control", "presets", "1h, 2h, 3h, 5h, 08:00, 12:00")
+        cfg.cp.set("control", "default_preset", "5h")
+        labels = [l for row in self.ctl.screen("onoff.start")[1] for l, _, _ in row]
+        self.assertEqual(labels[:7], ["5 h (default)", "1 h", "2 h", "3 h", "Until 08:00", "Until 12:00", "Custom…"])
+
+    def test_50_screenshot_albums_limits(self):
+        from runner import shots
+        d = os.path.join(self.sb.dir, "many")
+        items = []
+        for i in range(36):
+            p = os.path.join(d, "f%02d.png" % i)
+            png(p)
+            items.append({"path": p})
+        big = os.path.join(d, "big.png")
+        with open(big, "wb") as f:
+            f.truncate(shots.MAX_BYTES + 1)
+        albums, skipped, rest = shots.plan_albums([{"path": big}] + items)
+        self.assertEqual([len(a) for a in albums], [10, 10, 10])
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(rest, 6)
+        self.assertEqual(shots.plan_albums(items[:3])[0], [items[:3]])
+        self.assertEqual(shots.plan_albums([])[0], [])
+
+    def test_51_screenshots_and_review_are_sent(self):
+        self.make_runs()
+        open(os.path.join(self.sb.root, "qa", "out", "P901_20261126_0100", "REPORT.md"), "w").write("step 3 FAILED\n")
+        self.say(A, "ems")
+        mid = self.mid()
+        for l in ("🔍", "Screenshots", "GX1", "P901", "Key screens"):
+            self.tap(A, mid, l)
+        groups = [p for m, p, _ in self.tg.uploads if m == "sendMediaGroup"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(json.loads(groups[0]["media"])), 6)  # one key screen in 6 variants
+        self.assertIn("Back", " ".join(self.labels(mid)))
+        for _ in range(4):
+            self.tap(A, mid, "⬅")
+        self.tap(A, mid, "Review")
+        self.tap(A, mid, "GX1")
+        self.assertTrue(any(m == "sendDocument" for m, _, _ in self.tg.uploads))
+        texts = [m["text"] for m in self.tg.sent]
+        self.assertTrue(any("P901 — REPORT: step 3 FAILED" in t for t in texts))
+        self.assertIn("sent", self.text_of(mid))
+        # every-step set, and a failed album falls back to single files
+        self.tg.fail_media = True
+        n = len(self.tg.uploads)
+        for _ in range(3):
+            self.tap(A, mid, "⬅")
+        for l in ("🔍", "Screenshots", "GX1", "P902", "Every step"):
+            self.tap(A, mid, l)
+        docs = [m for m, _, _ in self.tg.uploads[n:] if m == "sendDocument"]
+        self.assertEqual(len(docs), 2)  # bn light: steps 001 and 002
+
+    def test_52_one_listener_serves_consent_and_menu(self):
+        sb = self.sb
+        sb.eng.consent.enabled = lambda: True
+        sb.run()
+        self.assertEqual(sb.status("GX1.gate.design"), "blocked")
+        n = len([c for c in self.tg.calls if c[0] == "getUpdates"])
+        ControlTests.uid += 2
+        self.tg.updates += [{"update_id": ControlTests.uid - 1, "message": {"from": {"id": int(A)}, "text": "/approve GX1-design 1",
+                                                                          "message_id": 9}},
+                            {"update_id": ControlTests.uid, "message": {"from": {"id": int(B)}, "text": "/ems", "message_id": 10,
+                                                                      "chat": {"id": int(B), "type": "private"}}}]
+        sb.eng.consent.poll(force=True)
+        self.assertEqual(len([c for c in self.tg.calls if c[0] == "getUpdates"]), n + 1)
+        self.assertEqual(len([f for f in os.listdir(sb.c("to-research")) if "Q-consent" in f]), 1)
+        self.assertTrue(any("reply_markup" in m and '"m:go:onoff' in m["reply_markup"] for m in self.tg.sent))
+        # consent buttons are untouched by the menu
+        self.tg.updates.append({"update_id": ControlTests.uid + 1, "callback_query": {"from": {"id": int(B)}, "data": "c|GX1-design|2",
+                                                                                   "message": {"message_id": 1}}})
+        sb.eng.consent.poll(force=True)
+
+    def test_53_switch_off_ignores_menu_but_not_consent(self):
+        sb = self.sb
+        sb.eng.consent.enabled = lambda: True
+        self.ctl.enabled = lambda: False
+        sb.run()
+        self.say(A, "ems")
+        self.assertFalse(any('"m:' in m.get("reply_markup", "") for m in self.tg.sent))
+        self.assertFalse(any(c[0] == "setMyCommands" for c in self.tg.calls))
+        self.say(A, "/approve GX1-design 1")
+        self.assertEqual(len([f for f in os.listdir(sb.c("to-research")) if "Q-consent" in f]), 1)
+
+    def test_54_cross_notice_log_and_rate_limit(self):
+        pause = self.recorder("pause")
+        self.say(A, "/ems pause now")
+        self.tap(A, self.mid(), "✅")
+        notes = [m for m in self.tg.sent if m["chat_id"] == B and "reply_markup" not in m]
+        self.assertEqual([m["text"] for m in notes], ["%s paused EMS (now)" % A])
+        self.assertFalse([m for m in self.tg.sent if m["chat_id"] == A and m.get("text", "").startswith(A)])
+        for _ in range(4):
+            self.say(A, "/ems pause")
+            self.tap(A, self.mid(), "✅")
+        self.assertEqual(pause.call_count, 5)
+        self.say(A, "/ems pause")
+        self.tap(A, self.mid(), "✅")
+        self.assertEqual(pause.call_count, 5)
+        self.assertIn("Too many", self.text_of(self.mid()))
+        log = open(os.path.join(self.sb.var, "telegram_control.log")).read().splitlines()
+        self.assertTrue(all(len(l.split("\t")) == 4 for l in log))
+        self.assertTrue(any("\tok: " in l for l in log) and any("rate limit" in l for l in log))
+        with unittest.mock.patch("runner.control.now", lambda: time.time() + 61):
+            self.say(A, "/ems pause")
+            self.tap(A, self.mid(), "✅")
+        self.assertEqual(pause.call_count, 6)
+
+    def test_55_typed_shortcuts_and_commands(self):
+        self.say(A, "/ems@skybot status")
+        self.assertIn("Mode:", self.tg.sent[-1]["text"])
+        self.say(A, "/ems duration 2h")
+        self.assertIn("Change end from", self.tg.sent[-1]["text"])
+        self.assertIn("✅ Run", [b["text"] for b in self.kb(self.mid())])
+        self.say(A, "/ems duration 99h")
+        self.assertIn("Not understood", self.tg.sent[-1]["text"])
+        self.say(A, "/ems resume")  # not paused: not available
+        self.assertIn("not available", self.tg.sent[-1]["text"])
+        self.say(A, "EMS")
+        self.assertIn("EMS · running", self.tg.sent[-1]["text"])
+        self.assertEqual(len([c for c in self.tg.calls if c[0] == "setMyCommands"]), 1)
+        self.say(A, "emsx")
+        self.say(A, "hello")
+        n = len(self.tg.sent)
+        self.say(A, "ems", date=time.time() - 3600)  # queued while the Mac slept: not answered later
+        self.assertEqual(len(self.tg.sent), n)
+
+    def test_56_close_and_back_navigation(self):
+        self.say(A, "ems")
+        mid = self.mid()
+        self.tap(A, mid, "⏻")
+        self.assertIn("Stop session now", self.labels(mid))
+        self.tap(A, mid, "⬅")
+        self.assertIn("✖ Close", self.labels(mid))
+        self.tap(A, mid, "✖")
+        self.assertIn("Closed", self.text_of(mid))
+        self.assertEqual(self.sb.eng.state()["mode"], "running")
 
 
 if __name__ == "__main__":

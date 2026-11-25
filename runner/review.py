@@ -37,6 +37,19 @@ def _problems(run):
     return out
 
 
+def collect_problems(project_root, phases):
+    """Problem lines for the given phases (latest QA run of each), prefixed with the phase."""
+    qa_out = os.path.join(project_root, "qa", "out")
+    out = []
+    for ph in phases:
+        run = _latest_run(qa_out, ph)
+        if not run:
+            out.append("%s — no QA run yet" % ph)
+            continue
+        out += ["%s — %s" % (ph, x) for x in _problems(run)]
+    return out
+
+
 def build(project_root, phases, unit, key_variants=2):
     qa_out = os.path.join(project_root, "qa", "out")
     parts, problems_all, missing = [], [], []
