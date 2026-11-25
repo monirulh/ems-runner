@@ -388,6 +388,37 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(sb.status("research-2026-11-26_019"), "done")
         self.assertEqual(sb.status("P901.t01"), "done")
 
+    def test_29_owner_action_goes_to_research_first(self):
+        self.sb = sb = Sandbox({r"P901\.t01": ["blocked:owner-action:", "done"], r"research-": ["done"]}, research=True)
+        sb.run()
+        sb.approve("GX1_design.md")
+        sb.run()
+        qs = [n for n in os.listdir(sb.c("to-research")) if "owner-action-check" in n]
+        self.assertEqual(len(qs), 1, "the runner writes one Q for the owner-action stop")
+        text = open(sb.c("to-research", qs[0])).read()
+        self.assertIn("From: Runner", text)
+        self.assertIn("need help", text)
+        self.assertEqual(sb.status("P901.t01"), "done", "Research answered; the task resumed without the owner")
+        self.assertFalse([e for e in sb.events("notify") if e.get("level") == "urgent" and "P901.t01" in e.get("title", "")],
+                         "no urgent owner alert for a stop Research could answer")
+
+    def test_30_owner_action_reaches_owner_after_two_checks_or_research_off(self):
+        self.sb = sb = Sandbox({r"P901\.t01": ["blocked:owner-action:"] * 3, r"research-": ["done", "done"]},
+                               research=True)
+        sb.run()
+        sb.approve("GX1_design.md")
+        sb.run()
+        t = sb.task("P901.t01")
+        self.assertEqual(t["blocked"]["reason"], "owner-action", "third stop goes to the owner")
+        self.assertEqual(len([n for n in os.listdir(sb.c("to-research")) if "owner-action-check" in n]), 2)
+        sb.close()
+        self.sb = sb = Sandbox({r"P901\.t01": ["blocked:owner-action:"]})
+        sb.run()
+        sb.approve("GX1_design.md")
+        sb.run()
+        self.assertEqual(sb.task("P901.t01")["blocked"]["reason"], "owner-action", "research off: owner as before")
+        self.assertFalse([n for n in os.listdir(sb.c("to-research")) if "owner-action-check" in n])
+
     def test_27_research_off_only_notifies(self):
         q = "2026-11-26_018_Q-x.md"
         self.sb = sb = Sandbox({})

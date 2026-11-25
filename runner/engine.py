@@ -992,12 +992,69 @@ class Engine(object):
             self.save_tasks(data)
         self.log("review %s asked for changes; fix round %d queued" % (tid, r))
 
+    TRIAGE_MAX = 2
+
+    def triage_owner_action(self, tid, res):
+        """AUTO-Q11 extension (owner, 2026-11-25): an agent that stops for the owner is first checked by automatic
+        Research. The runner writes a Q for it; Research answers settled or small items itself and parks only real
+        owner items (AUTO-Q12). Returns the Q file name, or None when the block goes straight to the owner."""
+        if not self.cfg.getbool("auto", "research", False):
+            return None
+        task = next((t for t in self.tasks()["tasks"] if t["id"] == tid), None)
+        if not task or task["kind"] in ("research", "gate") or task.get("triage_count", 0) >= self.TRIAGE_MAX:
+            return None
+        box = os.path.join(self.project.collab, "to-research")
+        os.makedirs(box, exist_ok=True)
+        nums = [int(n[11:14]) for n in os.listdir(box) if len(n) > 14 and n[11:14].isdigit()]
+        day = time.strftime("%Y-%m-%d")
+        name = "%s_%03d_Q-%s-owner-action-check.md" % (day, max(nums + [0]) + 1, tid.replace(".", "-"))
+        lines = [
+            "Copyright (c) 2026 Monirul Hasan. All rights reserved.",
+            "<!-- Q message written by the runner: a task stopped for the owner; Research checks it first. -->",
+            "",
+            "# Q: %s stopped as owner action — check before the owner is asked" % tid,
+            "From: Runner      To: Research      Date: %s" % day,
+            "About: %s      Release tag: none" % tid,
+            "Needs action: yes   Blocking: yes",
+            "Kind: question",
+            "",
+            "Task: %s — %s" % (tid, task.get("title", "")),
+            "Stop number for this task: %d of %d (after that the runner asks the owner directly)."
+            % (task.get("triage_count", 0) + 1, self.TRIAGE_MAX),
+            "",
+            "## What the agent reported",
+            str(res.get("summary", "")).strip() or "(no summary)",
+            "",
+            "Files: %s" % ", ".join(res.get("files") or []) if res.get("files") else "Files: none listed",
+            "Tests: %s" % res.get("tests", "none listed"),
+            "Waiting for (agent's words): %s" % (res.get("waiting_for") or "-"),
+            "Run log: %s" % (task.get("attempts") or [{}])[-1].get("log", "see tools/ems-runner/var/logs/runs/"),
+            "",
+            "## What Research does",
+            "Sort each reason the agent gave: settled by a decision on record, a small in-phase choice, or a real",
+            "owner item. Answer the first two in a D message that names this file, so the task resumes. A real owner",
+            "item is something only the owner can do or decide: a command the guard refuses (destructive cleanup),",
+            "an account, a credential, money, a store, a pilot go-live. For those, write the owner file (AUTO-Q12)",
+            "with the exact command or steps.",
+        ]
+        with open(os.path.join(box, name), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        self.log("owner-action stop of %s sent to automatic Research first: %s" % (tid, name), kind="triage", task=tid)
+        return name
+
     def block(self, tid, res):
         reason = res.get("reason") or ("approval" if res.get("status") == "needs_approval" else
                                        "research" if res.get("status") == "refused" else "question")
         waiting = res.get("waiting_for")
+        extra = {}
+        if reason == "owner-action":
+            q = self.triage_owner_action(tid, res)
+            if q:
+                reason, waiting = "question", q
+                prev = next((t for t in self.tasks()["tasks"] if t["id"] == tid), {})
+                extra["triage_count"] = prev.get("triage_count", 0) + 1
         self.mark(tid, status="blocked", blocked={"reason": reason, "waiting_for": waiting, "since": now(),
-                                                  "note": res.get("summary", "")})
+                                                  "note": res.get("summary", "")}, **extra)
         self.checkpoint("blocked: %s" % reason, tid)
         self.log("blocked %s: %s (%s)" % (tid, reason, waiting), kind="blocked", task=tid, reason=reason)
         what = {"approval": "Needs your approval", "question": "Waiting for Research", "skyui": "Waiting for SkyUI",

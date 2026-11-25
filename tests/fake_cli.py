@@ -62,7 +62,7 @@ def main():
             open(p, "a").write("review\n")
         if task.startswith("research-"):
             qid = task[len("research-"):]
-            p = os.path.join(root, "docs", "collab", "to-dev", "%s_900_D90-auto-answer.md" % qid[:10])
+            p = os.path.join(root, "docs", "collab", "to-dev", "%s_9%s_D9%s-auto-answer.md" % (qid[:10], qid[-2:], qid[-2:]))
             open(p, "w").write("# D90\nFrom: Research      To: Dev      Date: x\nAbout: answer\n"
                                "Needs action: yes            Blocking: no\nKind: answer\n\nAnswer to %s.\n" % qid)
         if task.endswith(".handover"):
