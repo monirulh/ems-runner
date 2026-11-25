@@ -97,7 +97,7 @@ New requirements go to the backlog and are built only after the whole plan is do
 |---|---|
 | `ems start` / `--for 3h` / `--until 08:00` | Start working (default 5 h) |
 | `ems set-duration 2h` / `07:30` | Change the running session |
-| `ems pause` / `ems pause --now` / `ems resume` | Pause after the task / at once / continue |
+| `ems pause` / `ems resume` | Pause after the running task finishes, its checks included (wait for the "Paused" notice; use this before editing the runner) / continue. `ems pause --now` is an emergency stop: it interrupts the running task, which is rerun |
 | `ems stop` | End the session now (checkpoint, sleep) |
 | `ems status`, `ems watch`, `ems progress`, `ems log -f` | See what is happening |
 | `ems open screens|designs|reviews|approvals|progress` | Open in Finder |

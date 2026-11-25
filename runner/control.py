@@ -130,7 +130,7 @@ class Control(object):
 
     def sig(self):
         st, on, paused = self.snap()
-        return [st["mode"], on, int((st.get("session") or {}).get("end", 0))]
+        return [st["mode"], on, int((st.get("session") or {}).get("end", 0)), bool(st.get("pause_requested"))]
 
     def state_line(self):
         st, on, paused = self.snap()
@@ -138,8 +138,12 @@ class Control(object):
             return "EMS · off"
         parts = ["EMS", "paused" if paused else ("waiting" if st["mode"] == "waiting" else "running")]
         cur = st.get("current")
-        if cur:
+        if cur and actions.verifying(cur):
+            parts.append("%s VERIFYING" % cur["task"])
+        elif cur:
             parts.append("%s (%s)" % (cur["task"], str(cur["model"]).capitalize()))
+        if st.get("pause_requested") and not paused:
+            parts.append("pause requested (after %s)" % st["pause_requested"].get("after"))
         parts.append("ends %s" % clock(st["session"]["end"]))
         return " · ".join(parts)
 
@@ -151,7 +155,8 @@ class Control(object):
         if top[0] == "pr" and len(top) == 1:
             return on
         if top[0] == "pr":
-            return (on and not paused) if top[1] in ("task", "now") else paused if top[1] == "resume" else False
+            asked = bool(st.get("pause_requested"))
+            return (on and not paused) if top[1] in ("task", "now") else (paused or asked) if top[1] == "resume" else False
         if top[0] == "dur":
             return on
         return True
@@ -171,9 +176,11 @@ class Control(object):
         if p[0] == "onoff" and p[1] == "start":
             return "Start a session until %s?" % self.end_of(p[2])
         if p[0] == "onoff" and p[1] == "stop":
-            return "Stop the session now? The running task is checkpointed."
+            return "Stop the session now? This interrupts the running task; it is checkpointed."
         if p[0] == "pr":
-            return {"task": "Pause after the current task?", "now": "Pause now? The running task is interrupted and checkpointed.",
+            return {"task": "Pause after the current task? It finishes first, including its checks.",
+                    "now": "⚠ Pause now? This interrupts the running task (agent or checks). It is checkpointed and "
+                           "will be rerun when you resume. Use only in an emergency.",
                     "resume": "Resume the session?"}[p[1]]
         if p[0] == "dur":
             return "Change end from %s to %s?" % (clock(st["session"]["end"]), self.end_of(p[1]))
@@ -208,9 +215,10 @@ class Control(object):
                 return head, [[("Stop session now", "go", "onoff.stop")], back("home")]
             return head, [[("Start session", "go", "onoff.start")], back("home")]
         if p[0] == "pr" and len(p) == 1:
-            if paused:
+            if paused or st.get("pause_requested"):
                 return head, [[("Resume", "go", "pr.resume")], back("home")]
-            return head, [[("Pause after this task", "go", "pr.task")], [("Pause now", "go", "pr.now")], back("home")]
+            return head, [[("Pause after this task", "go", "pr.task")],
+                          [("⚠ Pause now (stops the running task)", "go", "pr.now")], back("home")]
         if (p[0] == "onoff" and p[1:2] == ["start"] and len(p) == 2) or (p[0] == "dur" and len(p) == 1):
             specs, default = self.presets()
             base = path
@@ -224,7 +232,8 @@ class Control(object):
                 (p[0] == "onoff" and p[1:2] == ["stop"]) or p[0] == "pr":
             return head + "\n" + self.confirm_text(path), [[("✅ Run", "run", path), ("⬅ Back", "go", parent)]]
         if p[0] == "status":
-            body = actions.status_text(self.eng)
+            now_txt = "\n".join(actions.now_block(self.eng, st, compact=True))
+            body = (now_txt + "\n\n" if now_txt else "") + actions.status_text(self.eng)
             return (head + "\n\n" + body)[:3900], [[("🔄 Refresh", "go", "status"), ("⬅ Back", "go", "home")]]
         if p[0] == "rv":
             return self.rv_screen(p, head)
@@ -481,7 +490,8 @@ class Control(object):
             if spec:
                 path = ("onoff.start." if cmd == "start" else "dur.") + spec
         if path is None:
-            self.tg_try("sendMessage", {"chat_id": cid, "text": "Not understood. Use /ems, /ems status, /ems pause [now], "
+            self.tg_try("sendMessage", {"chat_id": cid, "text": "Not understood. Use /ems, /ems status, /ems pause (waits for the running task; "
+                                        "/ems pause now interrupts it), "
                                         "/ems resume, /ems stop, /ems start [2h], /ems duration 2h (1 min to 24 h or hh:mm)."})
             self.log_action(uid, "ems " + " ".join(args), "refused: not understood")
             return

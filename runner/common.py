@@ -41,6 +41,16 @@ def fmt_dur(seconds):
     return "%dh%02dm" % (h, m) if h else "%dm" % m
 
 
+def fmt_dur_s(seconds):
+    """'9m 15s', '45s', '1h 02m 03s' (second resolution; fmt_dur is minutes only)."""
+    seconds = int(max(0, seconds))
+    h, rem = divmod(seconds, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return "%dh %02dm %02ds" % (h, m, sec)
+    return "%dm %02ds" % (m, sec) if m else "%ds" % sec
+
+
 def parse_duration(text):
     """'5h', '90m', '1h30m', '2.5h' -> seconds."""
     text = text.strip().lower()
@@ -190,6 +200,7 @@ DEFAULT_STATE = {
     "wait": None,              # {"reason": limit|network|service, "until": ts, "detail": str}
     "current": None,           # {"task": id, "model": str, "started": ts, "pid": int}
     "interrupt": None,         # reason string set by the CLI
+    "pause_requested": None,   # {"after": task id, "at": ts}: pause when the running task (agent + checks) is done
     "model_blocks": {},        # model -> ts until which it is limited
     "service_failures": 0,
     "last_checkpoint": None,

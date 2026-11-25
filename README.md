@@ -40,7 +40,7 @@ Decisions: AUTO-Q1–AUTO-Q9 (owner, 2026-11-25; Research register part 4). Pyth
 | `ems tasks [--all]` | the task list |
 | `ems log [-f]` | the runner log; each run's full stream is in `var/logs/runs/` |
 | `ems usage [--days 7]` | runs, estimated cost and tokens per model |
-| `ems pause` / `ems pause --now` | pause after the current task / interrupt it with a checkpoint |
+| `ems pause` / `ems pause --now` | pause after the running task finishes, agent and checks (wait for the "Paused" notice) / EMERGENCY: interrupt the running task, checkpoint, it is rerun |
 | `ems resume` | continue a paused session (also after `/login`) |
 | `ems stop` | end the session now (checkpoint, then sleep) |
 | `ems unblock <task> [--note ..] [--model opus]` | release a task you have dealt with |
@@ -55,6 +55,7 @@ Decisions: AUTO-Q1–AUTO-Q9 (owner, 2026-11-25; Research register part 4). Pyth
 - **Approval files** count only if they name the owner (OP-Q1 template); Research writes them. The guard blocks agents from writing them.
 - **Done means verified:** the runner checks the expected output files and runs the task's verify commands itself (only commands on `[verify] allowed_prefixes`).
 - **Failures:** two failures (or the same error twice) move the task to Opus; if Opus fails too, the task is blocked and you are notified. Nothing loops.
+- **Checks stay visible:** while the runner verifies a task it says so (`ems status`: `VERIFYING`, check i of n, plain-word name, elapsed time and limit), keeps its heartbeat, answers Telegram, and obeys Stop. A check that runs longer than `[verify] notify_after_minutes` (default 3, 0 = off) sends one Telegram/macOS message per task.
 - **Limits:** "You've hit your … limit · resets …" → checkpoint, sleep until the reset + 5 minutes, resume if the session still has time. An Opus- or Sonnet-only limit blocks only that model. 429/529/5xx: the agent retries; then the runner waits 5/15/30 minutes, then blocks. No network: it waits and probes. Login expired: it pauses and tells you.
 - **Session end:** no new task starts; the current one gets `grace_minutes` (15), then it is interrupted and checkpointed (WIP commit on the `phase/*` branch only). The runner sleeps until `ems start`.
 - **Restarts:** an interrupted task goes back to pending with a note to inspect partial work; it is never assumed done.
@@ -80,7 +81,7 @@ When a task stops at an owner gate, the runner sends a header (options, inline b
 
 ## Telegram control menu (TG-CONTROL)
 
-Set `telegram = yes` under `[control]` in `config.ini` (`no` = menu ignored; the consent gate is unaffected). Send `ems` or `/ems` to the bot in a private chat: one menu message appears and every tap edits it in place. Items: On/Off (start with a duration, stop), Pause/Resume (after this task, now), Status, Duration, Review & screenshots. Only actions valid for the current state are shown; anything that changes the runner needs a Confirm screen (✅ Run / ⬅ Back); every level has Back. Typed shortcuts open the Confirm screen: `/ems pause [now]`, `/ems resume`, `/ems stop`, `/ems start [2h]`, `/ems duration 2h`; `/ems status` shows the status.
+Set `telegram = yes` under `[control]` in `config.ini` (`no` = menu ignored; the consent gate is unaffected). Send `ems` or `/ems` to the bot in a private chat: one menu message appears and every tap edits it in place. Items: On/Off (start with a duration, stop), Pause/Resume (after this task; "Pause now" is an emergency stop that interrupts the running task), Status, Duration, Review & screenshots. Only actions valid for the current state are shown; anything that changes the runner needs a Confirm screen (✅ Run / ⬅ Back); every level has Back. Typed shortcuts open the Confirm screen: `/ems pause [now]`, `/ems resume`, `/ems stop`, `/ems start [2h]`, `/ems duration 2h`; `/ems status` shows the status.
 
 - Same listener as the consent gate (callback prefixes `c:` consent, `m:` menu); it runs in the daemon, also while a task is running. State: `var/consent.json` (update offset), `var/telegram_control.json` (open menus, nonces).
 - Buttons are single-use and expire 10 minutes after the menu was last drawn; before ✅ Run the state is re-read and, if it changed, the menu is redrawn instead.

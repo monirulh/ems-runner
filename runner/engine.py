@@ -10,13 +10,14 @@ import socket
 import subprocess
 import sys
 import glob
+import tempfile
 import time
 
-from . import agent, notify
+from . import actions, agent, notify
 from .consent import Consent
 from .control import Control
-from .common import (DEFAULT_STATE, Config, Logger, RUNNER_HOME, Store, fmt_dur, hm, iso, now, read_text,
-                     write_json)
+from .common import (DEFAULT_STATE, Config, Logger, RUNNER_HOME, Store, fmt_dur, fmt_dur_s, hm, iso, now,
+                     read_text, write_json)
 from .plan import Project, load_sequence, msg_id, msg_refs, next_unit, unit_by_id
 
 MODEL_KINDS = ("group_design", "design_check", "phase_plan", "build", "test", "apply", "qa", "docs", "po", "handover",
@@ -24,6 +25,7 @@ MODEL_KINDS = ("group_design", "design_check", "phase_plan", "build", "test", "a
 PLAN_TASK_KINDS = ("build", "test", "apply", "qa", "docs")
 NO_MODEL = ("gate", "wait_cards", "phase_end", "unit_end")
 ESCALATE_TO = "opus"
+VERIFY_STOPPED = object()  # verify() result: an owner action or SIGTERM stopped the checks
 
 
 class SafeDict(dict):
@@ -98,7 +100,8 @@ class Engine(object):
         hours = self.cfg.getfloat("session", "default_hours", 5)
         end = until or (now() + (seconds if seconds else hours * 3600))
         st = self.update_state(mode="running", pause_reason=None, session={"start": now(), "end": end},
-                               wait=None, interrupt=None, service_failures=0, notified=[])
+                               wait=None, interrupt=None, service_failures=0, notified=[],
+                               pause_requested=None)
         self.log("session started until %s" % iso(end), kind="session_start", end=end)
         return st
 
@@ -176,37 +179,41 @@ class Engine(object):
 
     # ------------------------------------------------------------------ recovery
     def recover(self):
-        """Never assume an interrupted task finished: put it back with a note."""
+        """Never assume an interrupted task finished: put it back with a note. Any task left 'running' goes back
+        too, also when `current` is empty or names another task (safety net)."""
         st = self.state()
         cur = st.get("current")
-        if not cur:
-            return
-        pid = cur.get("pid")
-        alive = False
-        if pid == os.getpid():
-            return
-        if pid:
-            try:
-                os.kill(pid, 0)
-                alive = True
-            except OSError:
-                alive = False
-        if alive:
-            return
+        if cur:
+            pid = cur.get("pid")
+            if pid == os.getpid():
+                return
+            if pid:
+                try:
+                    os.kill(pid, 0)
+                    return  # a live runner process still owns it
+                except OSError:
+                    pass
+        reset = []
         with self.store.locked():
             data = self.tasks()
             for t in data["tasks"]:
-                if t["id"] == cur["task"] and t["status"] == "running":
+                if t["status"] == "running":
                     t["status"] = "pending"
+                    t["verify_progress"] = None
                     t.setdefault("notes", []).append(
                         "%s: a previous attempt was interrupted (runner restart, crash or sleep). Inspect git "
                         "status, diffs and test results first; do not assume any step finished." % iso())
-            self.save_tasks(data)
-            st = self.state()
-            st["current"] = None
-            self.store.save("state.json", st)
-        self.log("recovered interrupted task %s" % cur["task"], kind="recover", task=cur["task"])
-        self.checkpoint("recovery after interruption", cur["task"])
+                    reset.append(t["id"])
+            if reset:
+                self.save_tasks(data)
+            if cur:
+                st = self.state()
+                st["current"] = None
+                self.store.save("state.json", st)
+        for tid in reset:
+            self.log("recovered interrupted task %s" % tid, kind="recover", task=tid)
+        if reset:
+            self.checkpoint("recovery after interruption", reset[0])
 
     # ------------------------------------------------------------------ one step
     def step(self):
@@ -232,6 +239,9 @@ class Engine(object):
             self.notify("info", "Resumed", "Wait for %s is over." % w.get("reason"))
             st = self.state()
         if st["mode"] != "running":
+            return False
+        if st.get("pause_requested") and not st.get("current"):
+            self.apply_pause_request(None)  # nothing is running: the request takes effect now
             return False
         if not st.get("session") or t >= st["session"]["end"]:
             self.end_session("session time ended")
@@ -580,7 +590,8 @@ class Engine(object):
         started = now()
         self.mark(task["id"], status="running")
         self.update_state(current={"task": task["id"], "model": model, "started": started, "pid": os.getpid(),
-                                   "log": run_log}, next_action="running %s on %s" % (task["id"], model))
+                                   "log": run_log, "step": "agent"},
+                          next_action="running %s on %s" % (task["id"], model))
         self.log("start %s (%s) on %s" % (task["id"], task["kind"], model), kind="task_start", task=task["id"], model=model)
 
         def should_interrupt():
@@ -590,16 +601,85 @@ class Engine(object):
                 return s["interrupt"]
             return None
 
-        out = agent.run(self.cfg, self.log, cmd, cwd, run_log, deadline, should_interrupt,
-                        env_extra={"EMS_TASK_ID": task["id"], "EMS_ROLE": role,
-                                   "EMS_PROJECT_ROOT": self.project.root})
-        ended = now()
-        attempt = {"model": model, "start": started, "end": ended, "kind": out.kind, "cost": out.cost,
-                   "session_id": out.session_id, "status": (out.result or {}).get("status"),
-                   "summary": ((out.result or {}).get("summary") or out.detail or "")[:500], "log": run_log}
-        self.record_usage(task, model, out)
-        self.update_state(current=None, interrupt=None)
-        self.handle(task["id"], out, attempt)
+        try:
+            out = agent.run(self.cfg, self.log, cmd, cwd, run_log, deadline, should_interrupt,
+                            env_extra={"EMS_TASK_ID": task["id"], "EMS_ROLE": role,
+                                       "EMS_PROJECT_ROOT": self.project.root})
+            ended = now()
+            attempt = {"model": model, "start": started, "end": ended, "kind": out.kind, "cost": out.cost,
+                       "session_id": out.session_id, "status": (out.result or {}).get("status"),
+                       "summary": ((out.result or {}).get("summary") or out.detail or "")[:500], "log": run_log}
+            self.record_usage(task, model, out)
+            if out.kind == "ok":
+                # `current` stays through the checks, so status, heartbeat and Telegram keep working (and Pause/Stop apply)
+                self._cur(step="verifying", agent_result=attempt["status"] or "done", agent_ended=ended)
+            else:
+                self.update_state(interrupt=None)
+            self.handle(task["id"], out, attempt)
+        finally:
+            self.update_state(current=None, interrupt=None)
+            self.mark(task["id"], verify_progress=None)
+        self.apply_pause_request(task["id"])
+
+    def _cur(self, **changes):
+        """Update fields of the current-run record (no-op when nothing runs)."""
+        with self.store.locked():
+            st = self.state()
+            if st.get("current"):
+                st["current"].update(changes)
+                self.store.save("state.json", st)
+
+    def peek_next(self, assume_done=None):
+        """'P004.t07 on sonnet' for the task that would start next (read-only; ignores model limits)."""
+        data = self.tasks()
+        done = {t["id"] for t in data["tasks"] if t["status"] == "done"}
+        if assume_done:
+            done.add(assume_done)
+        best = None
+        for i, t in enumerate(data["tasks"]):
+            if t["status"] != "pending" or t["kind"] in ("gate", "wait_cards") or any(d not in done for d in t["deps"]):
+                continue
+            key = (-t.get("priority", 0), i)
+            if best is None or key < best[0]:
+                best = (key, t)
+        if not best:
+            return None
+        t = best[1]
+        if t["kind"] in NO_MODEL or t["kind"] not in MODEL_KINDS:
+            return "%s (runner step)" % t["id"]
+        return "%s on %s" % (t["id"], t.get("model") or self.cfg.model_for(t["kind"]))
+
+    def apply_pause_request(self, tid):
+        """RUNNER-PAUSE-1: the task has finished (agent and checks); now the runner pauses, with one notice."""
+        st = self.state()
+        if not st.get("pause_requested"):
+            return
+        if st["mode"] == "asleep":
+            self.update_state(pause_requested=None)
+            return
+        if st["mode"] == "paused":
+            self.update_state(pause_requested=None)  # already paused for another reason; that notice stands
+            return
+        if tid is None:
+            text = "Paused. Nothing was running."
+        else:
+            t = next((x for x in self.tasks()["tasks"] if x["id"] == tid), {})
+            last = (t.get("attempts") or [{}])[-1]
+            if t.get("status") == "done":
+                n, tot = last.get("checks") or (0, 0)
+                what = "done, checks %d of %d passed" % (n, tot) if tot else "done"
+            elif t.get("status") == "blocked":
+                what = "blocked: %s" % (t.get("blocked") or {}).get("reason")
+            elif last.get("status") == "failed":
+                what = "failed: %s; it will be retried" % (last.get("summary") or "")[:120].splitlines()[0]
+            else:
+                what = "interrupted; it will be rerun"
+            nxt = self.peek_next()
+            text = "Paused. %s finished (%s). Next task when you resume: %s." % (tid, what, nxt or "none queued")
+        self.update_state(mode="paused", pause_reason="owner", pause_requested=None, wait=None)
+        self.log(text, kind="paused")
+        self.notify("info", "Paused", text)
+        self.write_progress()
 
     def build_prompt(self, task, model):
         kind = task["kind"]
@@ -683,15 +763,19 @@ class Engine(object):
             status = res.get("status")
             if status == "done":
                 problem = self.verify(task, attempt)
+                if problem is VERIFY_STOPPED:
+                    return self.verify_stopped(tid)
                 if problem:
                     return self.fail(tid, problem)
-                self.after_done(tid, res)
+                self.after_done(tid, res, attempt.get("checks"))
                 return
             if task["kind"] == "design_check" and status in ("approve", "owner"):
                 problem = self.verify(task, attempt)
+                if problem is VERIFY_STOPPED:
+                    return self.verify_stopped(tid)
                 if problem:
                     return self.fail(tid, problem)
-                self.after_done(tid, res)
+                self.after_done(tid, res, attempt.get("checks"))
                 return self.after_design_check(task, res)
             if status == "changes_required" and task["kind"] == "review":
                 return self.review_changes(tid, res)
@@ -761,6 +845,20 @@ class Engine(object):
                 self.update_state(mode="paused", pause_reason="owner")
             return
         return self.fail(tid, out.detail or "agent crashed")
+
+    def verify_stopped(self, tid):
+        """Stop, pause-now or SIGTERM during the checks: the task goes back to pending (not failed)."""
+        reason = self._verify_stop_reason or "stop"
+        self.update_state(interrupt=None)
+        self.mark(tid, status="pending", notes=self._notes(tid, "%s: stopped during verify; agent work is committed; "
+                                                                "rerun verify (%s)." % (iso(), reason)))
+        self.checkpoint("run stopped during verify: %s" % reason, tid)
+        if reason == "stop":
+            self.end_session("stopped by owner")
+        elif reason == "pause":
+            self.update_state(mode="paused", pause_reason="owner", pause_requested=None)
+
+    _verify_stop_reason = None
 
     def _notes(self, tid, note):
         data = self.tasks()
@@ -902,22 +1000,126 @@ class Engine(object):
                 self.load_phase_plan(task["phase"])
             except ValueError as e:
                 return "phase plan invalid: %s" % e
+        cmds = task.get("verify", [])
         allowed = self.cfg.getlist("verify", "allowed_prefixes")
-        for cmd in task.get("verify", []):
+        for cmd in cmds:
             if not any(cmd.startswith(a) for a in allowed):
                 return "verify command not on the allowed list: %s" % cmd
+        total = len(cmds)
+        began = now()
+        self._cur(verify_total=total, verify_index=0, verify_began=began, long_sent=False)
+        self._save_checks(task["id"], attempt, [0, total])
+        for idx, cmd in enumerate(cmds, 1):
+            name = actions.check_name(cmd)
+            label = "check %d of %d: %s" % (idx, total, name)
+            self._cur(verify_index=idx, verify_cmd=cmd, verify_name=name, verify_started=now())
+            self.mark(task["id"], verify_progress="%d/%d" % (idx, total))
             self.log("verify %s: %s" % (task["id"], cmd))
-            try:
-                p = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True,
-                                   timeout=self.cfg.getint("verify", "timeout_minutes", 40) * 60)
-            except subprocess.TimeoutExpired:
-                return "verify timed out: %s" % cmd
+            t0 = now()
+            res = self._run_check(task, cmd, label, name)
+            took = fmt_dur_s(now() - t0)
+            if res[0] == "stopped":
+                self._verify_stop_reason = res[1]
+                self.log("verify %s %d/%d STOPPED (%s) after %s: %s" % (task["id"], idx, total, res[1], took, name),
+                         kind="verify_check", task=task["id"], index=idx, total=total, result="stopped")
+                return VERIFY_STOPPED
+            kind, rc, out_s, err_s = res
             with open(attempt["log"], "a") as f:
-                f.write("\n[verify] %s -> %d\n%s\n%s\n" % (cmd, p.returncode, p.stdout[-4000:], p.stderr[-4000:]))
-            if p.returncode != 0:
-                tail = (p.stdout + p.stderr).strip().splitlines()[-15:]
-                return "verify failed: %s\n%s" % (cmd, "\n".join(tail))
+                f.write("\n[verify] %s -> %s\n%s\n%s\n" % (cmd, rc if kind != "timeout" else "timeout", out_s[-4000:], err_s[-4000:]))
+            if kind == "timeout":
+                self.log("verify %s %d/%d FAILED (timed out) after %s: %s" % (task["id"], idx, total, took, name),
+                         kind="verify_check", task=task["id"], index=idx, total=total, result="timeout")
+                self._verify_followup(task, total, began, False, label)
+                return "verify timed out (%s): %s" % (label, cmd)
+            if rc != 0:
+                tail = (out_s + err_s).strip().splitlines()[-15:]
+                self.log("verify %s %d/%d FAILED in %s: %s\n%s" % (task["id"], idx, total, took, name, "\n".join(tail[-5:])),
+                         kind="verify_check", task=task["id"], index=idx, total=total, result="failed")
+                self._verify_followup(task, total, began, False, label)
+                return "verify failed (%s): %s\n%s" % (label, cmd, "\n".join(tail))
+            self._save_checks(task["id"], attempt, [idx, total])
+            self.log("verify %s %d/%d OK in %s: %s" % (task["id"], idx, total, took, name),
+                     kind="verify_check", task=task["id"], index=idx, total=total, result="ok")
+        if total:
+            self._verify_followup(task, total, began, True, None)
         return None
+
+    def _save_checks(self, tid, attempt, checks):
+        """Record 'checks passed i of n' on the attempt (already stored in tasks.json) and in memory."""
+        attempt["checks"] = checks
+        with self.store.locked():
+            data = self.tasks()
+            task = next(t for t in data["tasks"] if t["id"] == tid)
+            if task["attempts"]:
+                task["attempts"][-1]["checks"] = checks
+            self.save_tasks(data)
+
+    def _stop_group(self, proc):
+        """Stop a verify command and its children: SIGINT, then SIGTERM, then SIGKILL."""
+        for sig, wait in ((signal.SIGINT, 10), (signal.SIGTERM, 10), (signal.SIGKILL, 5)):
+            try:
+                os.killpg(proc.pid, sig)
+            except OSError:
+                pass
+            for _ in range(int(wait * 5)):
+                if proc.poll() is not None:
+                    return
+                time.sleep(0.2)
+
+    def _run_check(self, task, cmd, label, name):
+        """Run one verify command without blocking the runner: every tick writes the heartbeat, polls Telegram
+        and looks for Stop / Pause now / SIGTERM. -> ("done", rc, out, err) | ("timeout", ...) | ("stopped", reason)."""
+        limit = self.cfg.getfloat("verify", "timeout_minutes", 40) * 60
+        tick = self.cfg.getfloat("verify", "poll_seconds", 2)
+        started = now()
+        with tempfile.TemporaryFile("w+") as fo, tempfile.TemporaryFile("w+") as fe:
+            proc = subprocess.Popen(cmd, shell=True, cwd=self.project.root, stdout=fo, stderr=fe, text=True,
+                                    stdin=subprocess.DEVNULL, start_new_session=True)
+            while True:
+                self.heartbeat()
+                self.consent.poll()
+                reason = self.state().get("interrupt")
+                if reason:
+                    self.log("stopping verify command (%s)" % reason)
+                    self._stop_group(proc)
+                    return ("stopped", reason)
+                if proc.poll() is not None:
+                    break
+                if now() - started > limit:
+                    self.log("verify command timed out after %s; stopping it" % fmt_dur_s(limit))
+                    self._stop_group(proc)
+                    fo.seek(0)
+                    fe.seek(0)
+                    return ("timeout", None, fo.read(), fe.read())
+                self._maybe_long_notice(task, label, started, limit)
+                time.sleep(tick)
+            fo.seek(0)
+            fe.seek(0)
+            return ("done", proc.returncode, fo.read(), fe.read())
+
+    def _maybe_long_notice(self, task, label, started, limit):
+        """RUNNER-VERIFY-Q2: one Telegram/macOS message per task when a check runs long."""
+        after = self.cfg.getfloat("verify", "notify_after_minutes", 3) * 60
+        cur = self.state().get("current") or {}
+        if after <= 0 or cur.get("long_sent") or now() - started < after:
+            return
+        self._cur(long_sent=True)
+        t_end = time.strftime("%H:%M", time.localtime(cur.get("agent_ended") or started))
+        self.notify("info", "EMS · %s · VERIFYING" % task["id"],
+                    "Agent finished (%s) at %s. The runner is checking the work.\n%s — running %s (limit %dm)\n"
+                    "Pause and Stop still work." % (cur.get("agent_result") or "done", t_end, label[:1].upper() + label[1:],
+                                                    fmt_dur(now() - started), limit // 60))
+
+    def _verify_followup(self, task, total, began, ok, failed_label):
+        cur = self.state().get("current") or {}
+        if not cur.get("long_sent"):
+            return
+        took = fmt_dur_s(now() - began)
+        if ok:
+            text = "%s checks finished: %d of %d passed in %s" % (task["id"], total, total, took)
+        else:
+            text = "%s checks finished: FAILED at %s after %s" % (task["id"], failed_label, took)
+        self.notify("info", "EMS · %s · checks finished" % task["id"], text)
 
     def load_phase_plan(self, phase):
         path = os.path.join(self.cfg.var_dir, "plans", "%s.json" % phase)
@@ -937,7 +1139,7 @@ class Engine(object):
                 raise ValueError("verify must be a list")
         return items
 
-    def after_done(self, tid, res):
+    def after_done(self, tid, res, checks=None):
         self.update_state_service_ok()
         with self.store.locked():
             data = self.tasks()
@@ -945,6 +1147,8 @@ class Engine(object):
             task["status"] = "done"
             task["finished"] = now()
             task["result"] = {k: res.get(k) for k in ("summary", "files", "tests", "tag") if k in res}
+            if checks and checks[1]:
+                task["result"]["checks"] = "%d of %d" % tuple(checks)
             if task["kind"] == "phase_plan":
                 ph = task["phase"]
                 items = self.load_phase_plan(ph)
@@ -972,7 +1176,9 @@ class Engine(object):
                         t["blocked"] = None
                         t.setdefault("notes", []).append("SkyUI finished %s: %s" % (task["request"], res.get("summary", "")))
             self.save_tasks(data)
-        self.log("done %s: %s" % (tid, res.get("summary", "")), kind="task_done", task=tid)
+        self.log("done %s: %s%s" % (tid, res.get("summary", ""),
+                                     (" (checks passed: %d of %d)" % tuple(checks)) if checks and checks[1] else ""),
+                 kind="task_done", task=tid)
         self.write_progress()
 
     def review_changes(self, tid, res):
@@ -1173,7 +1379,7 @@ class Engine(object):
         self.write_progress()
 
     def end_session(self, why):
-        self.update_state(mode="asleep", session=None, wait=None, interrupt=None,
+        self.update_state(mode="asleep", session=None, wait=None, interrupt=None, pause_requested=None,
                           next_action="asleep — start a new session with `ems start`")
         self.log("session ended: %s" % why, kind="session_end")
         self.notify("info", "Session ended", "%s. The runner is asleep until you start it again." % why)
@@ -1193,7 +1399,8 @@ class Engine(object):
         st = self.state()
         counts = {}
         for t in data["tasks"]:
-            counts[t["status"]] = counts.get(t["status"], 0) + 1
+            key = "verifying" if t["status"] == "running" and t.get("verify_progress") else t["status"]
+            counts[key] = counts.get(key, 0) + 1
         lines = ["# EMS runner progress", "", "Updated: %s" % iso(), "",
                  "- Mode: %s%s" % (st["mode"], (" (%s)" % st.get("pause_reason")) if st.get("pause_reason") else ""),
                  "- Unit: %s; done units: %s" % (data.get("unit"), ", ".join(data.get("units_done", [])) or "none"),
@@ -1203,7 +1410,8 @@ class Engine(object):
         for t in data["tasks"]:
             b = t.get("blocked") or {}
             model = t.get("model") or (self.cfg.model_for(t["kind"]) if t["kind"] in MODEL_KINDS else "-")
-            lines.append("| %s | %s | %s | %s | %s |" % (t["id"], t["kind"], t["status"], model,
+            shown = "verifying %s" % t["verify_progress"] if t["status"] == "running" and t.get("verify_progress") else t["status"]
+            lines.append("| %s | %s | %s | %s | %s |" % (t["id"], t["kind"], shown, model,
                                                          (b.get("reason") or "") + (" " + str(b.get("waiting_for")) if b.get("waiting_for") else "")))
         with open(self.store.path("PROGRESS.md"), "w") as f:
             f.write("\n".join(lines) + "\n")

@@ -843,7 +843,7 @@ class ControlTests(unittest.TestCase):
         c = self.ctl
         flat = lambda path: [l for row in c.screen(path)[1] for l, _, _ in row]  # noqa: E731
         self.assertIn("⏱ Duration", flat("home"))
-        self.assertEqual(flat("pr")[:2], ["Pause after this task", "Pause now"])
+        self.assertEqual(flat("pr")[:2], ["Pause after this task", "⚠ Pause now (stops the running task)"])
         self.assertNotIn("Resume", flat("pr"))
         self.sb.eng.update_state(mode="paused")
         self.assertEqual(flat("pr")[0], "Resume")
@@ -867,7 +867,7 @@ class ControlTests(unittest.TestCase):
             mid = self.mid()
             for l in labels:
                 self.tap(who, mid, l)
-        flow(A, ["⏯", "Pause now", "✅"])
+        flow(A, ["⏯", "⚠ Pause now", "✅"])
         pause.assert_called_once_with(self.sb.eng, True)
         pause.reset_mock()
         flow(A, ["⏯", "Pause after", "✅"])
@@ -1131,6 +1131,236 @@ class ControlTests(unittest.TestCase):
         self.tap(A, mid, "✖")
         self.assertIn("Closed", self.text_of(mid))
         self.assertEqual(self.sb.eng.state()["mode"], "running")
+
+
+class VerifyVisibilityTests(unittest.TestCase):
+    """RUNNER-VERIFY / RUNNER-PAUSE-1: checks stay visible and controllable; pause waits for the running task."""
+
+    def setUp(self):
+        self.sb = None
+
+    def tearDown(self):
+        if self.sb:
+            self.sb.close()
+
+    def build(self, verify, script=None, extra=None):
+        plan = {"phase": "P901", "tasks": [{"id": "t01", "kind": "build", "title": "b", "verify": verify},
+                                           {"id": "t02", "kind": "test", "title": "t", "verify": []}]}
+        sc = {"__plan__:P901": plan}
+        sc.update(script or {})
+        self.sb = sb = Sandbox(sc)
+        cfg = sb.eng.cfg.cp
+        for k, v in dict({"poll_seconds": "0.2", "notify_after_minutes": "0"}, **(extra or {})).items():
+            cfg.set("verify", k, v)
+        sb.run()
+        sb.approve("GX1_design.md")
+        return sb
+
+    def start(self, sb, n=200):
+        th = threading.Thread(target=sb.run, args=(n,))
+        th.start()
+        return th
+
+    def wait_for(self, sb, pred, limit=20):
+        end = time.time() + limit
+        while time.time() < end:
+            cur = sb.eng.state().get("current")
+            if cur and pred(cur):
+                return cur
+            time.sleep(0.1)
+        self.fail("state never reached the expected step: %s" % sb.eng.state().get("current"))
+
+    def notices(self, sb, needle):
+        return [e for e in sb.events("notify") if needle in e.get("title", "")]
+
+    def hb(self, sb):
+        return float(open(sb.eng.store.path("heartbeat")).read())
+
+    def test_60_current_kept_through_verify_and_heartbeat_advances(self):
+        sb = self.build(["ls docs; sleep 3", "test -d docs"])
+        th = self.start(sb)
+        cur = self.wait_for(sb, lambda c: c.get("step") == "verifying" and c.get("verify_index") == 1)
+        self.assertEqual((cur["task"], cur["verify_total"], cur["agent_result"]), ("P901.t01", 2, "done"))
+        self.assertEqual(cur["verify_name"], "file check")
+        h1 = self.hb(sb)
+        time.sleep(1.2)
+        self.assertGreater(self.hb(sb), h1)
+        self.assertEqual(sb.task("P901.t01")["verify_progress"], "1/2")
+        th.join(30)
+        self.assertEqual(sb.status("P901.t01"), "done")
+        self.assertEqual(sb.task("P901.t01")["attempts"][-1]["checks"], [2, 2])
+        self.assertIsNone(sb.eng.state()["current"])
+        self.assertTrue([e for e in sb.events("verify_check") if "1/2 OK" in e["msg"] and "file check" in e["msg"]])
+
+    def test_61_status_and_telegram_text_name_the_verify_step(self):
+        sb = self.build([])
+        t = now()
+        sb.eng.update_state(current={"task": "P004.t06", "model": "sonnet", "started": t - 900, "pid": 1, "log": "x",
+                                     "step": "verifying", "agent_result": "done", "agent_ended": t - 400,
+                                     "verify_index": 2, "verify_total": 3, "verify_started": t - 372,
+                                     "verify_name": "full test suite: skysoft_ems",
+                                     "verify_cmd": "infra/scripts/dc.sh exec x run-tests --app skysoft_ems"})
+        from runner import actions
+        txt = actions.status_text(sb.eng)
+        for want in ("VERIFYING", "check 2 of 3: full test suite: skysoft_ems", "6m 12s", "limit 40m",
+                     "cmd: infra/scripts/dc.sh", "after the checks pass:"):
+            self.assertIn(want, txt)
+        tg, _ = sb.eng.control.screen("status")
+        for want in ("VERIFYING", "Check 2 of 3: full test suite: skysoft_ems", "Running 6m 12s", "limit 40m"):
+            self.assertIn(want, tg)
+        sb.eng.update_state(current={"task": "P004.t07", "model": "sonnet", "started": t - 220, "pid": 1, "log": "x",
+                                     "step": "agent"})
+        self.assertIn("P004.t07 — AGENT WORKING on sonnet — 3m 40s", actions.status_text(sb.eng))
+
+    def test_62_plain_word_names(self):
+        from runner.actions import check_name
+        for cmd, want in [("infra/scripts/dc.sh exec x bench --site s run-tests --app skysoft_ems", "full test suite: skysoft_ems"),
+                          ("infra/scripts/dc.sh exec x bench --site s run-tests --module a.tests.b", "tests: a.tests.b"),
+                          ("node qa/P004_run.mjs", "QA screenshots run"), ("ls docs", "file check"),
+                          ("test -f a", "file check"), ("test -d a", "file check"),
+                          ("infra/scripts/dc.sh exec x bench --site s list-apps", "installed apps check"),
+                          ("flutter test", "check command")]:
+            self.assertEqual(check_name(cmd), want)
+
+    def test_63_telegram_is_polled_during_verify(self):
+        sb = self.build(["ls docs; sleep 2"])
+        calls = []
+        real = sb.eng.consent.poll
+        sb.eng.consent.poll = lambda *a, **k: (calls.append(1), real(*a, **k))[1]
+        sb.run(3)
+        self.assertGreaterEqual(len(calls), 5)
+
+    def test_64_long_verify_message_once_with_followup(self):
+        sb = self.build(["ls docs; sleep 3", "ls docs; sleep 3"], extra={"notify_after_minutes": "0.03"})
+        sb.run(3)
+        self.assertEqual(len(self.notices(sb, "P901.t01 · VERIFYING")), 1)
+        long = self.notices(sb, "P901.t01 · VERIFYING")[0]
+        self.assertIn("Check 1 of 2: file check", long["msg"])
+        self.assertIn("Pause and Stop still work.", long["msg"])
+        fol = self.notices(sb, "P901.t01 · checks finished")
+        self.assertEqual(len(fol), 1)
+        self.assertIn("2 of 2 passed", fol[0]["msg"])
+        self.assertEqual(self.notices(sb, "P901.t02"), [])
+
+    def test_65_short_check_and_setting_zero_send_nothing(self):
+        sb = self.build(["ls docs; sleep 2"], extra={"notify_after_minutes": "3"})
+        sb.run(3)
+        self.assertEqual(self.notices(sb, "VERIFYING") + self.notices(sb, "checks finished"), [])
+
+    def test_66_setting_zero_sends_nothing_for_a_long_check(self):
+        sb = self.build(["ls docs; sleep 3"], extra={"notify_after_minutes": "0"})
+        sb.run(3)
+        self.assertEqual(self.notices(sb, "VERIFYING") + self.notices(sb, "checks finished"), [])
+
+    def test_67_pause_during_agent_step_finishes_task_then_pauses(self):
+        from runner import actions
+        sb = self.build(["test -d docs"], {r"P901\.t01": ["sleep:3", "done"]})
+        th = self.start(sb)
+        self.wait_for(sb, lambda c: c.get("step") == "agent" and c["task"] == "P901.t01")
+        ok, text = actions.pause(sb.eng)
+        self.assertIn("Pause requested. P901.t01 is running (agent working", text)
+        self.assertIn("including its checks", text)
+        self.assertIn("pause requested (after P901.t01)", actions.status_text(sb.eng))
+        th.join(30)
+        st = sb.eng.state()
+        self.assertEqual((st["mode"], st["pause_requested"]), ("paused", None))
+        self.assertEqual(sb.status("P901.t01"), "done")
+        self.assertEqual(sb.task("P901.t01")["attempts"][-1]["kind"], "ok")
+        self.assertNotEqual(sb.status("P901.t02"), "done")
+        n = self.notices(sb, "Paused")
+        self.assertEqual(len(n), 1)
+        self.assertIn("Paused. P901.t01 finished (done, checks 1 of 1 passed). Next task when you resume: P901.t02 on", n[0]["msg"])
+
+    def test_68_pause_during_verify_waits_for_the_checks(self):
+        from runner import actions
+        sb = self.build(["ls docs; sleep 3"])
+        th = self.start(sb)
+        self.wait_for(sb, lambda c: c.get("step") == "verifying" and c.get("verify_index") == 1)
+        ok, text = actions.pause(sb.eng)
+        self.assertIn("P901.t01 is verifying (check 1 of 1: file check). It will finish its checks", text)
+        th.join(30)
+        self.assertEqual(sb.status("P901.t01"), "done")
+        self.assertEqual(sb.eng.state()["mode"], "paused")
+        self.assertNotEqual(sb.status("P901.t02"), "done")
+        self.assertEqual(len(self.notices(sb, "Paused")), 1)
+
+    def test_69_pause_with_nothing_running_is_immediate_and_nothing_starts(self):
+        from runner import actions
+        sb = self.build(["ls"])
+        ok, text = actions.pause(sb.eng)
+        self.assertEqual(text, "Paused. Nothing was running.")
+        self.assertEqual(sb.eng.state()["mode"], "paused")
+        open(sb.c("to-dev", "2026-11-26_060_D60-x.md"), "w").write(msg("Research", "Dev", "D60", kind="correction"))
+        open(sb.c("to-skyui", "2026-11-26_061_R61-x.md"), "w").write(msg("Dev", "SkyUI", "R61"))
+        before = len(sb.calls())
+        sb.run()
+        self.assertEqual(len(sb.calls()), before)
+        self.assertEqual(sb.eng.state()["current"], None)
+        self.assertFalse([t for t in sb.eng.tasks()["tasks"] if t["kind"] in ("inbox", "skyui")])
+
+    def test_70_pause_now_during_verify_stops_command_and_requeues(self):
+        from runner import actions
+        sb = self.build(["ls docs; sleep 25"])
+        th = self.start(sb)
+        self.wait_for(sb, lambda c: c.get("step") == "verifying" and c.get("verify_index") == 1)
+        t0 = time.time()
+        actions.pause(sb.eng, True)
+        th.join(30)
+        self.assertLess(time.time() - t0, 15)
+        t = sb.task("P901.t01")
+        self.assertEqual(t["status"], "pending")
+        self.assertIn("stopped during verify; agent work is committed; rerun verify", t["notes"][-1])
+        self.assertNotEqual(t["attempts"][-1].get("status"), "failed")
+        st = sb.eng.state()
+        self.assertEqual((st["mode"], st["current"]), ("paused", None))
+        self.assertIn("run stopped during verify", st["last_checkpoint"]["why"])
+
+    def test_71_sigterm_during_verify_requeues_task(self):
+        sb = self.build(["ls docs; sleep 25"])
+        th = self.start(sb, 2)
+        self.wait_for(sb, lambda c: c.get("step") == "verifying" and c.get("verify_index") == 1)
+        sb.eng._stop = True
+        sb.eng.update_state(interrupt="restart")  # what on_term does while a task is current
+        th.join(30)
+        t = sb.task("P901.t01")
+        self.assertEqual(t["status"], "pending")
+        self.assertIn("stopped during verify", t["notes"][-1])
+        self.assertIsNone(sb.eng.state()["current"])
+
+    def test_72_owner_stop_during_verify_sleeps(self):
+        sb = self.build(["ls docs; sleep 25"])
+        th = self.start(sb)
+        self.wait_for(sb, lambda c: c.get("step") == "verifying" and c.get("verify_index") == 1)
+        from runner import actions
+        ok, text = actions.stop(sb.eng)
+        self.assertIn("interrupts the running task", text)
+        th.join(30)
+        self.assertEqual(sb.eng.state()["mode"], "asleep")
+        self.assertEqual(sb.status("P901.t01"), "pending")
+
+    def test_73_recover_resets_running_task_when_current_is_empty(self):
+        sb = self.build(["ls"])
+        sb.eng.ensure_unit()
+        sb.eng.mark("GX1.design", status="running")
+        sb.eng.update_state(current=None)
+        sb.eng.recover()
+        t = sb.task("GX1.design")
+        self.assertEqual(t["status"], "pending")
+        self.assertIn("do not assume", t["notes"][-1])
+
+    def test_74_verify_timeout_still_fails_and_names_the_check(self):
+        sb = self.build(["ls docs; sleep 20"], extra={"timeout_minutes": "0.03"})
+        t0 = time.time()
+        sb.run(2)
+        self.assertLess(time.time() - t0, 25)
+        t = sb.task("P901.t01")
+        self.assertIn("verify timed out (check 1 of 1: file check)", t["attempts"][0]["summary"])
+        self.assertNotEqual(t["status"], "done")
+
+    def test_75_failure_message_names_the_check(self):
+        sb = self.build(["test -f nope.txt"])
+        sb.run(2)
+        self.assertIn("verify failed (check 1 of 1: file check)", sb.task("P901.t01")["attempts"][0]["summary"])
 
 
 if __name__ == "__main__":
