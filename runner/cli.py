@@ -192,6 +192,9 @@ def cmd_unblock(eng, a):
         data = eng.tasks()
         for t in data["tasks"]:
             if t["id"] == a.task:
+                if t["status"] not in ("blocked", "failed"):
+                    print("%s is %s, not blocked; nothing to do." % (a.task, t["status"]))
+                    return 0
                 t["status"] = "pending"
                 t["blocked"] = None
                 if a.note:

@@ -1004,7 +1004,9 @@ class Engine(object):
                 "owner-action": "Owner action needed", "toolchain": "Toolchain missing",
                 "research": "Research must decide", "service": "Service errors",
                 "owner": "Your decision needed"}.get(reason, "Blocked")
-        level = "info" if reason == "skyui" else "urgent"
+        # only blocks that need the owner are urgent; questions answered by automatic Research are quiet (AUTO-Q11)
+        quiet = reason == "skyui" or (reason == "question" and self.cfg.getbool("auto", "research", False))
+        level = "info" if quiet else "urgent"
         self.notify(level, "%s: %s" % (what, tid), "%s%s" % (res.get("summary", ""),
                                                              (" — waiting for %s" % waiting) if waiting else ""))
         self.write_progress()

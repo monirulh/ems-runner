@@ -43,7 +43,10 @@ def send(cfg, log, level, title, body=""):
     token, chat = secrets.get("TELEGRAM_BOT_TOKEN"), secrets.get("TELEGRAM_CHAT_ID")
     if cfg.getbool("notify", "telegram", True) and token and chat and lvl >= _min_level(cfg, "telegram", "info"):
         text = ("🔴 " if level == "urgent" else "ℹ️ ") + title + ("\n" + body if body else "")
-        data = urllib.parse.urlencode({"chat_id": chat, "text": text[:3900]}).encode()
+        fields = {"chat_id": chat, "text": text[:3900]}
+        if level != "urgent" and cfg.getbool("notify", "telegram_silent_info", True):
+            fields["disable_notification"] = "true"  # info arrives without a sound
+        data = urllib.parse.urlencode(fields).encode()
         try:
             urllib.request.urlopen("https://api.telegram.org/bot%s/sendMessage" % token, data=data, timeout=15).read()
             ok.append("telegram")
