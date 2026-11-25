@@ -1047,7 +1047,11 @@ class Engine(object):
                                        "research" if res.get("status") == "refused" else "question")
         waiting = res.get("waiting_for")
         extra = {}
-        if reason == "owner-action":
+        asked = os.path.basename(str(waiting or ""))
+        if reason == "owner-action" and asked and os.path.exists(os.path.join(self.project.collab, "to-research", asked)):
+            # the agent already sent Research a Q and named it: wait on the answer, not on the owner (AUTO-Q13)
+            reason = "question"
+        elif reason == "owner-action":
             q = self.triage_owner_action(tid, res)
             if q:
                 reason, waiting = "question", q

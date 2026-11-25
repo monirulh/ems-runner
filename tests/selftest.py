@@ -419,6 +419,32 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(sb.task("P901.t01")["blocked"]["reason"], "owner-action", "research off: owner as before")
         self.assertFalse([n for n in os.listdir(sb.c("to-research")) if "owner-action-check" in n])
 
+    def test_31_owner_action_naming_its_own_q_waits_for_the_answer(self):
+        q = "2026-11-26_021_Q-login.md"
+        self.sb = sb = Sandbox({r"P901\.t01": ["blocked:owner-action:%s" % q, "done"],
+                                r"research-2026-11-26_021": ["done"]}, research=True)
+        sb.run()
+        open(sb.c("to-research", q), "w").write(msg("Dev", "Research", "P901.t01", blocking="yes", needs="no"))
+        sb.approve("GX1_design.md")
+        sb.run()
+        self.assertFalse([n for n in os.listdir(sb.c("to-research")) if "owner-action-check" in n],
+                         "no extra runner Q when the agent already asked")
+        self.assertEqual(sb.status("research-2026-11-26_021"), "done", "catch-up answers the agent's own Q")
+        self.assertEqual(sb.status("P901.t01"), "done", "Research's answer resumes the task")
+        self.assertIn("2026-11-26_921", " ".join(sb.task("P901.t01").get("notes", [])))
+
+    def test_32_header_quoted_in_body_does_not_override_kind(self):
+        q = "2026-11-26_022_Q-x.md"
+        self.sb = sb = Sandbox({r"P901\.t01": ["blocked:question:%s" % q, "done"]})
+        sb.run()
+        sb.approve("GX1_design.md")
+        sb.run()
+        body = "Answer to %s.\nNote: D40 had `Kind: answer`, `About: P901.t01`, sent earlier." % q
+        open(sb.c("to-dev", "2026-11-26_042_D42-answer.md"), "w").write(msg("Research", "Dev", "D42", "answer", body=body))
+        sb.run()
+        self.assertEqual(sb.status("P901.t01"), "done")
+        self.assertFalse(os.path.exists(os.path.join(sb.root, "docs", "backlog", "2026-11-26_042_D42-answer.md")))
+
     def test_27_research_off_only_notifies(self):
         q = "2026-11-26_018_Q-x.md"
         self.sb = sb = Sandbox({})

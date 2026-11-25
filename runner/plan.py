@@ -78,8 +78,10 @@ class Project(object):
         for line in text.splitlines()[:15]:
             # header lines may carry two fields: "From: Dev      To: Research      Date: ..."
             for m in re.finditer(r"(From|To|Date|About|Needs action|Blocking|Kind|Release tag):\s*(.*?)(?=\s{2,}\w[\w ]*:|$)", line, re.I):
-                head[m.group(1).lower()] = m.group(2).strip()
-        kind = head.get("kind", "").lower().split()[0] if head.get("kind") else None
+                # first occurrence wins: body lines that quote a header (e.g. "Kind: answer`, ...") must not override it
+                head.setdefault(m.group(1).lower(), m.group(2).strip())
+        km = re.match(r"[a-z-]+", head.get("kind", "").lower())
+        kind = km.group(0) if km else None
         if kind not in KINDS:
             kind = None
         return {"name": name, "box": box, "head": head, "kind": kind, "text": text}
